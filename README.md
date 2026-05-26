@@ -130,7 +130,7 @@ The Python script works with any Excel version.
 - International stocks (TSM, ASML, etc.): Yahoo returns financials in local currency. Convert manually.
 - The WACC cell in Assumptions pulls from the WACC sheet automatically. Don't overwrite it.
 - `yfinance` installs itself if it's missing.
-
+- The sample you see in Excel was built on 5/25/2026 and the stock was AAPL at close. This is a sample output just to show the accuracy of it. This sheet will not update often.
 ---
 
 ## Why I Built This
