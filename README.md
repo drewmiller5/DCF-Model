@@ -140,4 +140,3 @@ This is made for a finance student, an analyst, or just someone who wants to run
 ---
 
 *Python 3.13 · openpyxl · yfinance*
-# DCF-Model
