@@ -1,6 +1,6 @@
 # Professional DCF Valuation Model
 
-Currently freelancing. I studied undergrad in FinTech and Accoutning. Most people don't have access to Bloomberg Terminal, so I built one with real time access.
+Currently freelancing. I studied undergrad in Financial Technology and Accounting. Most people don't have access to Bloomberg Terminal, so I built one with real time access.
 
 One command. Any public company. Professional output.
 
