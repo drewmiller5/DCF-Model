@@ -1,5 +1,6 @@
 # Generated output — rebuild with build_dcf.py
 *.xlsx
+!DCF_Model_Sample.xlsx
 
 # Python
 __pycache__/
