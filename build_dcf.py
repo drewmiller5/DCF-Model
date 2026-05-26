@@ -1,11 +1,11 @@
 """
 Professional DCF Model Builder - v2 (correct cross-sheet references via cell tracking)
 Generates a comprehensive Excel DCF valuation model with stock data integration.
-Usage: python build_dcf.py
+Usage: python build_dcf.py [TICKER]
 Output: ~/Desktop/DCF_Model.xlsx (or ~/projects/DCF_Model.xlsx on Windows)
 """
 
-import os, datetime
+import os, sys, datetime
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -99,7 +99,7 @@ def row_h(ws, row, h=17):
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN BUILDER
 # ═══════════════════════════════════════════════════════════════════════════════
-def build_dcf():
+def build_dcf(filename="DCF_Model.xlsx"):
     wb = Workbook()
     CELLS = {}  # stores key cell addresses for cross-sheet references
 
@@ -126,12 +126,13 @@ def build_dcf():
     build_dcf_sheet(ws_dcf, CELLS)
     build_sensitivity(ws_sens, CELLS)
 
-    # Desktop path preference, fallback to projects
-    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-    out = os.path.join(desktop if os.path.isdir(desktop) else
-                       os.path.join(os.path.expanduser("~"), "projects"),
-                       "DCF_Model.xlsx")
-    wb.save(out)
+    out = os.path.join(os.getcwd(), filename)
+    try:
+        wb.save(out)
+    except PermissionError:
+        print(f"\n  ERROR: Could not save — {filename} is open in Excel.")
+        print("  Close the file and run the command again.")
+        sys.exit(1)
     print(f"Saved: {out}")
     return out
 
@@ -154,7 +155,7 @@ def build_guide(ws):
 
     steps = [
         ("Stock Search",    "Enter ticker in B5. Microsoft 365: Data > Stocks to link live data.\n"
-                            "Or run:  python update_dcf.py AAPL  to auto-fill from Yahoo Finance."),
+                            "Or run:  python build_dcf.py AAPL  to build and auto-fill in one step."),
         ("Assumptions",     "Edit all gold cells. Revenue growth, margins, WACC inputs, terminal value."),
         ("Income Statement","Historical (grey) + 10-year projection. FCF computed automatically."),
         ("WACC",            "Cost of equity (CAPM), cost of debt, capital structure -> WACC."),
@@ -290,7 +291,8 @@ def build_stock(ws, CELLS):
         "",
         "PYTHON AUTO-FILL (works with any Excel version):",
         "   pip install yfinance openpyxl",
-        "   python update_dcf.py AAPL",
+        "   python build_dcf.py AAPL   (build + fill in one step)",
+        "   python update_dcf.py AAPL  (refresh an existing model)",
     ]
     for step in steps:
         r += 1
@@ -1236,13 +1238,45 @@ def build_sensitivity(ws, CELLS):
 
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    path = build_dcf()
+    ticker = sys.argv[1].upper() if len(sys.argv) > 1 else None
+
+    if ticker is None:
+        ans = input("  Enter ticker to auto-populate (or press Enter to skip): ").strip().upper()
+        ticker = ans or None
+
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%I-%M%p")
+
+    if ticker:
+        name_options = [
+            f"DCF_Model_{ticker}_{stamp}.xlsx",
+            f"DCF_Model_{ticker}.xlsx",
+            f"DCF_Model_{stamp}.xlsx",
+            "DCF_Model.xlsx",
+        ]
+    else:
+        name_options = [
+            f"DCF_Model_{stamp}.xlsx",
+            "DCF_Model.xlsx",
+        ]
+
+    print("\n  Save as:")
+    for i, name in enumerate(name_options, 1):
+        print(f"    [{i}] {name}")
+    raw = input(f"  Choice [1]: ").strip()
+    choice = int(raw) if raw.isdigit() and 1 <= int(raw) <= len(name_options) else 1
+    filename = name_options[choice - 1]
+
+    path = build_dcf(filename=filename)
     print(f"\n  DCF Model created: {path}")
-    print("\n  Next steps:")
-    print("    1. Open DCF_Model.xlsx in Excel")
-    print("    2. Go to 'Stock Search' tab -> enter ticker in B5")
-    print("    3. Edit gold cells in 'Assumptions' tab")
-    print("    4. View implied price on 'DCF Valuation' tab")
-    print("    5. Explore scenarios in 'Sensitivity' tab")
-    print("\n    To auto-populate stock data:")
-    print("    pip install yfinance && python update_dcf.py AAPL")
+
+    if ticker:
+        from update_dcf import fetch_stock_data, update_excel
+        print(f"  Fetching data for {ticker} from Yahoo Finance...")
+        data = fetch_stock_data(ticker)
+        update_excel(path, data)
+
+    print(f"\n  Next steps:")
+    print(f"    1. Open {filename} in Excel")
+    print( "    2. Edit gold cells in 'Assumptions' tab")
+    print( "    3. View implied price on 'DCF Valuation' tab")
+    print( "    4. Explore scenarios in 'Sensitivity' tab")

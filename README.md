@@ -2,11 +2,10 @@
 
 Currently freelancing. I studied undergrad in FinTech and Accoutning. Most people don't have access to Bloomberg Terminal, so I built one with real time access.
 
-Two commands. Any public company. Professional output.
+One command. Any public company. Professional output.
 
 ```bash
-python build_dcf.py          # builds DCF_Model.xlsx
-python update_dcf.py         # pulls live data — enter your ticker when prompted
+python build_dcf.py AAPL     # builds DCF_Model.xlsx and populates live data
 ```
 
 ---
@@ -31,42 +30,54 @@ Gold cells are inputs. White cells are formulas. Don't touch the white cells.
 
 ## Install
 
+**Step 1 — Make sure Python is installed**
+
+Open a terminal (Mac: search "Terminal", Windows: search "Command Prompt") and run:
+
+```bash
+python --version
+```
+
+You should see `Python 3.9` or higher. If you get an error, download Python at [python.org/downloads](https://python.org/downloads) — just click Install and keep all defaults.
+
+**Step 2 — Install the two required packages**
+
 ```bash
 pip install openpyxl yfinance
 ```
 
-Python 3.9+. That's it.
+That's it. You only need to do this once.
 
 ---
 
 ## Usage
 
-### Step 1 — Build the model
+> **First time?** Open your terminal, navigate to the folder where you downloaded these files, then run the commands below. On Windows you can also right-click the folder and choose "Open in Terminal".
+
+### Step 1 — Build the model and load a stock
 
 ```bash
-python build_dcf.py
+python build_dcf.py AAPL
+python build_dcf.py MSFT
+python build_dcf.py NVDA
 ```
 
-Saves `DCF_Model.xlsx` to your Desktop. Run this once, or any time you want a clean slate.
-
-### Step 2 — Load a stock
-
-```bash
-python update_dcf.py AAPL
-python update_dcf.py MSFT
-python update_dcf.py NVDA
-```
-
-Pulls from Yahoo Finance. Populates Stock Search and pre-fills Assumptions with price, shares, debt, cash, beta, and revenue. Works with any ticker Yahoo supports.
+Saves the file to the current directory, then pulls live data from Yahoo Finance and populates Stock Search and Assumptions with price, shares, debt, cash, beta, and revenue. Works with any ticker Yahoo supports.
 
 No argument — it'll ask:
 
 ```bash
-python update_dcf.py
-# Enter ticker symbol (e.g. AAPL, MSFT, NVDA): TSLA
+python build_dcf.py
+# Enter ticker to auto-populate (or press Enter to skip): TSLA
 ```
 
-### Step 3 — Enter your thesis
+To refresh an existing model with new data without rebuilding:
+
+```bash
+python update_dcf.py AAPL
+```
+
+### Step 2 — Enter your thesis
 
 Open `DCF_Model.xlsx`. Go to **Assumptions**. Adjust the gold cells:
 
@@ -78,7 +89,7 @@ Open `DCF_Model.xlsx`. Go to **Assumptions**. Adjust the gold cells:
 
 This is where your view of the business goes. The model is just the math.
 
-### Step 4 — Read the output
+### Step 3 — Read the output
 
 - **DCF Valuation** → Implied share price vs current price, upside/downside
 - **Sensitivity** → How the price moves across scenarios. Green = upside, red = downside.
@@ -88,9 +99,9 @@ This is where your view of the business goes. The model is just the math.
 ## Workflow
 
 ```
-update_dcf.py TICKER
+build_dcf.py TICKER
       ↓
-Live data populates Stock Search + Assumptions
+Model built + live data populates Stock Search + Assumptions
       ↓
 You adjust growth rates and margins to reflect your thesis
       ↓
