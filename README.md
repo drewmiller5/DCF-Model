@@ -1,6 +1,6 @@
 # Professional DCF Valuation Model
 
-Currently freelancing. I studied undergrad in FinTech and Accoutning. Most people don't have access to Bloomberg Terminal, so I built one with real time access.
+I'm currently freelancing and former Accounting & FinTech student at Elon University. Bloomberg Terminal is one of the most powerful financial tools in the world however people don't have access to it. I built a platform that delievers real-time financial data and analytics to everyone.
 
 Two commands. Any public company. Professional output.
 
@@ -145,15 +145,23 @@ The Python script works with any Excel version.
 - International stocks (TSM, ASML, etc.): Yahoo returns financials in local currency. Convert manually.
 - The WACC cell in Assumptions pulls from the WACC sheet automatically. Don't overwrite it.
 - `yfinance` installs itself if it's missing.
+- **Historical data before ~2019:** falls back to SEC EDGAR. Update the `User-Agent` email on line 73 of `update_dcf.py` to your own — SEC's fair-use policy requires valid contact info.
+- Tested on openpyxl 3.1.5. A patch in `build_dcf.py` fixes a known rendering bug in 3.1.4+ where axis labels overlap chart content.
 
 ---
 
 ## Why I Built This
 
-I did my undergraduate studies in accounting and fintech, and often in classes models like these are models I wish I had. The DCF model started as something I learned in Finance and now it's something I use frequently for my personal projects.
+During my Accounting and FinTech studies, I often had to rely on data and tools that most people don't have access to. Bloomberg Terminal offers incredible capabilities, but it also comes with a significant cost.
 
-If you're a finance student, an analyst, or just someone who wants to run a real valuation without paying for Bloomberg, this is for you. Go enjoy it. 
+The DCF model started as something I learned in a finance course and has evolved into a platform that provides real-time financial data and valuation tools that anyone can use.
+
+My goal is simple: make high-quality financial analysis accessible to everyone.
+
+If you're a finance student, analyst, investor, or someone who enjoys digging into companies, I hope you find it useful.
+
+If you have ideas for improvements or new features, I'd love to hear from you. Feel free to reach out and help shape the next generation of accessible financial tools.
 
 ---
 
-*Python 3.13 · openpyxl · yfinance*
+*Python 3.10+ · openpyxl · yfinance*
