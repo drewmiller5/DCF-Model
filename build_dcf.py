@@ -1,15 +1,25 @@
 """
-Professional DCF Model Builder - v2 (correct cross-sheet references via cell tracking)
-Generates a comprehensive Excel DCF valuation model with stock data integration.
-Usage: python build_dcf.py [TICKER]
-Output: ~/Desktop/DCF_Model.xlsx (or ~/projects/DCF_Model.xlsx on Windows)
+Professional DCF Valuation Model Builder
+Generates a 10-sheet Excel DCF model with optional stock data population.
+Usage: python build_dcf.py [TICKER] [--date YYYY-MM-DD]
+Output: saved to the same directory as this script
 """
 
-import os, sys, datetime
+import os, datetime, argparse, sys
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, Reference
+
+# openpyxl 3.1.4+ bug: writes "Microsoft Excel Compatible / Openpyxl" into
+# app.xml, which triggers Excel's legacy chart rendering mode and causes axis
+# titles to overlap the plot area instead of sitting outside it.
+from openpyxl.packaging.extended import ExtendedProperties as _EP
+_EP_orig = _EP.__init__
+def _ep_fixed(self, *a, **kw):
+    _EP_orig(self, *a, **kw)
+    self.Application = "Microsoft Excel"
+_EP.__init__ = _ep_fixed
 
 # ─── COLORS ──────────────────────────────────────────────────────────────────
 NAVY       = "1B2A4A"
@@ -99,7 +109,7 @@ def row_h(ws, row, h=17):
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN BUILDER
 # ═══════════════════════════════════════════════════════════════════════════════
-def build_dcf(filename="DCF_Model.xlsx"):
+def build_dcf(output: str = "") -> str:
     wb = Workbook()
     CELLS = {}  # stores key cell addresses for cross-sheet references
 
@@ -110,10 +120,14 @@ def build_dcf(filename="DCF_Model.xlsx"):
     ws_wacc   = wb.create_sheet("WACC")
     ws_dcf    = wb.create_sheet("DCF Valuation")
     ws_sens   = wb.create_sheet("Sensitivity")
+    ws_scen   = wb.create_sheet("Scenarios")
+    ws_rdcf   = wb.create_sheet("Reverse DCF")
+    ws_price  = wb.create_sheet("Price")
 
     for ws, color in [
         (ws_guide, "808080"), (ws_stock, "3F5FA0"), (ws_assum, GOLD_ACC),
         (ws_is, "2E4170"), (ws_wacc, "006100"), (ws_dcf, NAVY), (ws_sens, "9C0006"),
+        (ws_scen, "70AD47"), (ws_rdcf, "833C00"), (ws_price, "4472C4"),
     ]:
         ws.sheet_properties.tabColor = color
         ws.sheet_view.showGridLines = False
@@ -125,12 +139,18 @@ def build_dcf(filename="DCF_Model.xlsx"):
     build_wacc(ws_wacc, CELLS)     # uses CELLS, populates CELLS["WACC"]
     build_dcf_sheet(ws_dcf, CELLS)
     build_sensitivity(ws_sens, CELLS)
+    build_scenarios(ws_scen, CELLS)
+    build_reverse_dcf(ws_rdcf, CELLS)
+    build_price_tracker(ws_price, CELLS)
 
-    out = os.path.join(os.getcwd(), filename)
+    if output:
+        out = output
+    else:
+        out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DCF_Model.xlsx")
     try:
         wb.save(out)
     except PermissionError:
-        print(f"\n  ERROR: Could not save — {filename} is open in Excel.")
+        print(f"\n  ERROR: Could not save — {os.path.basename(out)} is open in Excel.")
         print("  Close the file and run the command again.")
         sys.exit(1)
     print(f"Saved: {out}")
@@ -154,9 +174,13 @@ def build_guide(ws):
     row_h(ws, 2, 16)
 
     steps = [
-        ("Stock Search",    "Enter ticker in B5. Microsoft 365: Data > Stocks to link live data.\n"
-                            "Or run:  python build_dcf.py AAPL  to build and auto-fill in one step."),
-        ("Assumptions",     "Edit all gold cells. Revenue growth, margins, WACC inputs, terminal value."),
+        ("Stock Search",    "One command to build and populate — pick your stock and date:\n"
+                            "  python build_dcf.py AAPL                     (live data)\n"
+                            "  python build_dcf.py AAPL --date 2020-03-23   (COVID crash low)\n"
+                            "  python build_dcf.py AAPL --date 2008         (financial crisis)\n"
+                            "Microsoft 365: select B5 then Data > Stocks to link live data."),
+        ("Assumptions",     "Edit all gold cells. Revenue growth, margins, WACC inputs, terminal value.\n"
+                            "To refresh data only:  python update_dcf.py AAPL  (keeps your thesis intact)"),
         ("Income Statement","Historical (grey) + 10-year projection. FCF computed automatically."),
         ("WACC",            "Cost of equity (CAPM), cost of debt, capital structure -> WACC."),
         ("DCF Valuation",   "Discounted FCFs + terminal value -> Enterprise Value -> Implied Price."),
@@ -291,8 +315,7 @@ def build_stock(ws, CELLS):
         "",
         "PYTHON AUTO-FILL (works with any Excel version):",
         "   pip install yfinance openpyxl",
-        "   python build_dcf.py AAPL   (build + fill in one step)",
-        "   python update_dcf.py AAPL  (refresh an existing model)",
+        "   python update_dcf.py AAPL",
     ]
     for step in steps:
         r += 1
@@ -720,19 +743,45 @@ def build_is(ws, CELLS):
     sc(ws, f"B{r}", "  10-YEAR FCF PROJECTION (from model above)", bold=True, size=9,
        fc="FFFFFF", bg=DARK_BLUE, al=L, bdr=thin_border)
 
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.chart.layout import Layout, ManualLayout
     chart = BarChart()
     chart.type = "col"
-    chart.title = "Projected FCFF  (USD $M)"
+    chart.title = "FCF Projection  (USD $M)"
     chart.y_axis.title = "FCFF ($M)"
-    chart.style = 2
-    chart.height = 10
+    chart.style = 4
+    chart.height = 13
     chart.width  = 24
+    chart.legend = None
+    chart.varyColors = True
+    chart.gapWidth = 30
+    chart.x_axis.delete = False
+    chart.x_axis.tickLblPos = "low"
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.tickLblPos = "none"
+    chart.y_axis.majorTickMark = "none"
+    chart.y_axis.minorTickMark = "none"
+    chart.plot_area.layout = Layout(
+        manualLayout=ManualLayout(
+            xMode="edge", yMode="edge", wMode="edge", hMode="edge",
+            x=0.10, y=0.08, w=0.86, h=0.80,
+        )
+    )
     fcf_ref = Reference(ws, min_col=6, min_row=FCFF_ROW, max_col=15, max_row=FCFF_ROW)
     yr_ref  = Reference(ws, min_col=6, min_row=4,         max_col=15, max_row=4)
-    chart.add_data(fcf_ref)
+    chart.add_data(fcf_ref, from_rows=True)
     chart.set_categories(yr_ref)
     if chart.series:
-        chart.series[0].graphicalProperties.solidFill = "2E4170"
+        s = chart.series[0]
+        dLbls = DataLabelList()
+        dLbls.showVal        = True
+        dLbls.showLegendKey  = False
+        dLbls.showCatName    = False
+        dLbls.showSerName    = False
+        dLbls.showPercent    = False
+        dLbls.showBubbleSize = False
+        dLbls.numFmt = '#,##0'
+        s.dLbls = dLbls
     ws.add_chart(chart, f"B{r+1}")
 
 
@@ -891,20 +940,21 @@ def build_dcf_sheet(ws, CELLS):
     r = 3
     dsec(r, "DISCOUNT RATE & KEY INPUTS")
     params = [
-        ("WACC",                      f"={WACC_CELL}",   FMT_PCT2),
-        ("Terminal Growth Rate (g)",  f"={TVG_CELL}",    FMT_PCT2),
-        ("Exit EBITDA Multiple",      f"={TVMUL_CELL}",  FMT_MULT),
-        ("Net Debt ($M)",             f"={A['A_DEBT']}-{A['A_CASH']}", FMT_USD),
-        ("Shares Outstanding (M)",    f"={A['A_SHARES']}", FMT_SHR),
+        ("WACC",                     f"={WACC_CELL}",                    FMT_PCT2, "Ke×We + Kd(1-t)×Wd  —  from WACC sheet"),
+        ("Terminal Growth Rate (g)", f"={TVG_CELL}",                     FMT_PCT2, "Long-run FCF growth after Year 10  —  Assumptions"),
+        ("Exit EBITDA Multiple",     f"={TVMUL_CELL}",                   FMT_MULT, "Reference only; Gordon Growth is primary TV method"),
+        ("Net Debt ($M)",            f"={A['A_DEBT']}-{A['A_CASH']}",   FMT_USD,  "Total Debt minus Cash  —  from Assumptions"),
+        ("Shares Outstanding (M)",   f"={A['A_SHARES']}",                FMT_SHR,  "Diluted share count  —  from Assumptions"),
     ]
     PARAM_CELLS = {}
-    for label, formula, fmt in params:
+    for label, formula, fmt, note in params:
         r += 1
         row_h(ws, r, 17)
         lbl(ws, f"B{r}", f"  {label}")
         cal(ws, f"C{r}", formula, fmt)
-        sc(ws, f"D{r}", "", bg=GRAY_LIGHT, bdr=thin_border)
-        sc(ws, f"E{r}", "", bg=GRAY_LIGHT, bdr=thin_border)
+        ws.merge_cells(f"D{r}:E{r}")
+        sc(ws, f"D{r}", f"  {note}", size=8, italic=True,
+           fc="606060", bg=GRAY_LIGHT, al=L, bdr=thin_border)
         PARAM_CELLS[label] = f"C{r}"
 
     WACC_REF   = PARAM_CELLS["WACC"]
@@ -1236,47 +1286,506 @@ def build_sensitivity(ws, CELLS):
         lbl(ws, f"F{r}", f"  {note}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIOS SHEET  (Bear / Base / Bull)
+# ═══════════════════════════════════════════════════════════════════════════════
+def build_scenarios(ws, CELLS):
+    A = CELLS
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions["B"].width = 36
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 16
+    ws.column_dimensions["E"].width = 16
+
+    ws.merge_cells("B1:E1")
+    sc(ws, "B1", "SCENARIO ANALYSIS  -  Bear / Base / Bull", bold=True, size=13,
+       fc="FFFFFF", bg=NAVY, al=C)
+    row_h(ws, 1, 26)
+    ws.merge_cells("B2:E2")
+    sc(ws, "B2",
+       "  Edit gold cells for Bear and Bull cases. Base links from Assumptions. Implied prices auto-calculate.",
+       size=9, italic=True, fc="404040", bg=LIGHT_BLUE, al=L)
+    row_h(ws, 2, 13)
+
+    r = 4; row_h(ws, r, 18)
+    sc(ws, f"B{r}", "  ASSUMPTION", bold=True, size=9, fc="FFFFFF", bg=NAVY, al=L, bdr=thin_border)
+    sc(ws, f"C{r}", "BEAR",  bold=True, size=11, fc="FFFFFF", bg="C00000",  al=C, bdr=thin_border)
+    sc(ws, f"D{r}", "BASE",  bold=True, size=11, fc="FFFFFF", bg=DARK_BLUE, al=C, bdr=thin_border)
+    sc(ws, f"E{r}", "BULL",  bold=True, size=11, fc="FFFFFF", bg="375623",  al=C, bdr=thin_border)
+
+    def ssec(rr, label):
+        ws.merge_cells(f"B{rr}:E{rr}")
+        sc(ws, f"B{rr}", f"  {label}", bold=True, size=9, fc="FFFFFF",
+           bg=DARK_BLUE, al=L, bdr=thin_border)
+        row_h(ws, rr, 15)
+
+    def srow(rr, label, c_val, d_formula, e_val, fmt):
+        row_h(ws, rr, 17)
+        lbl(ws, f"B{rr}", f"  {label}")
+        inp(ws, f"C{rr}", c_val, fmt)
+        cal(ws, f"D{rr}", d_formula, fmt)
+        inp(ws, f"E{rr}", e_val, fmt)
+
+    r += 1; ssec(r, "REVENUE GROWTH")
+    r += 1; srow(r, "Y1-Y5 Revenue Growth (avg)", 0.030,
+                 f"=({A['A_G1']}+{A['A_G2']}+{A['A_G3']}+{A['A_G4']}+{A['A_G5']})/5",
+                 0.100, FMT_PCT2)
+    G15_ROW = r
+
+    r += 1; srow(r, "Y6-Y10 Revenue Growth (avg)", 0.015,
+                 f"=({A['A_G6']}+{A['A_G7']}+{A['A_G8']}+{A['A_G9']}+{A['A_G10']})/5",
+                 0.060, FMT_PCT2)
+    G610_ROW = r
+
+    r += 1; ssec(r, "MARGIN & DISCOUNT RATE")
+    r += 1; srow(r, "EBITDA Margin %", 0.260, f"={A['A_EBITDA_M']}", 0.400, FMT_PCT2)
+    r += 1; srow(r, "FCF Margin (% of Revenue)", 0.175,
+                 f"=({A['A_EBITDA_M']}-{A['A_CAPEX']}-{A['A_NWC']}+{A['A_SBC']})*(1-{A['A_TAX']})",
+                 0.270, FMT_PCT2)
+    FCF_M_ROW = r
+
+    r += 1; srow(r, "WACC", 0.110, f"={A['WACC_CELL']}", 0.080, FMT_PCT2)
+    WACC_ROW = r
+    r += 1; srow(r, "Terminal Growth Rate", 0.020, f"={A['A_TVG']}", 0.030, FMT_PCT2)
+    TGR_ROW = r
+
+    r += 1; ssec(r, "COMMON INPUTS  (linked from model)")
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Base Revenue Y0 ($M)")
+    for col in ["C", "D", "E"]: cal(ws, f"{col}{r}", f"={A['A_REV0']}", FMT_USD)
+    REV0_ROW = r
+
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Net Debt ($M)")
+    for col in ["C", "D", "E"]: cal(ws, f"{col}{r}", f"={A['A_DEBT']}-{A['A_CASH']}", FMT_USD)
+    ND_ROW = r
+
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Shares Outstanding (M)")
+    for col in ["C", "D", "E"]: cal(ws, f"{col}{r}", f"={A['A_SHARES']}", FMT_SHR)
+    SOUT_ROW = r
+
+    r += 1; ssec(r, "VALUATION OUTPUT")
+    r += 1; row_h(ws, r, 28)
+    sc(ws, f"B{r}", "  IMPLIED SHARE PRICE", bold=True, size=13,
+       fc="FFFFFF", bg=NAVY, al=L, bdr=thin_border)
+
+    for scen_col, bg in [("C", "C00000"), ("D", DARK_BLUE), ("E", "375623")]:
+        g1  = f"{scen_col}{G15_ROW}"
+        g2  = f"{scen_col}{G610_ROW}"
+        fm  = f"{scen_col}{FCF_M_ROW}"
+        wc  = f"{scen_col}{WACC_ROW}"
+        tgr = f"{scen_col}{TGR_ROW}"
+        r0  = f"{scen_col}{REV0_ROW}"
+        nd  = f"{scen_col}{ND_ROW}"
+        sh  = f"{scen_col}{SOUT_ROW}"
+        pv1 = (f"SUMPRODUCT({r0}*{fm}*(1+{g1})^{{1,2,3,4,5}},"
+               f"1/(1+{wc})^{{1,2,3,4,5}})")
+        pv2 = (f"SUMPRODUCT({r0}*{fm}*(1+{g1})^5*(1+{g2})^{{1,2,3,4,5}},"
+               f"1/(1+{wc})^{{6,7,8,9,10}})")
+        tv  = (f"{r0}*{fm}*(1+{g1})^5*(1+{g2})^5"
+               f"*(1+{tgr})/MAX({wc}-{tgr},0.0001)/(1+{wc})^10")
+        formula = f"=IFERROR(({pv1}+{pv2}+{tv}-{nd})/{sh},\"--\")"
+        cal(ws, f"{scen_col}{r}", formula, FMT_USD2, bold=True)
+        ws[f"{scen_col}{r}"].fill = Fill(bg)
+        ws[f"{scen_col}{r}"].font = F(bold=True, size=14, color="FFFFFF")
+    IMPLIED_ROW = r
+
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Current Market Price ($)")
+    for col in ["C", "D", "E"]: cal(ws, f"{col}{r}", f"={A['A_PRICE']}", FMT_USD2)
+    CUR_ROW = r
+
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Upside / (Downside) %", bold=True, bg=LIGHT_BLUE)
+    for col in ["C", "D", "E"]:
+        cal(ws, f"{col}{r}",
+            f"=IFERROR(({col}{IMPLIED_ROW}-D{CUR_ROW})/D{CUR_ROW},\"--\")",
+            FMT_PCT2, bold=True)
+    ws[f"C{r}"].fill = Fill("FFC7CE")
+    ws[f"E{r}"].fill = Fill("C6EFCE")
+
+    r += 2; ssec(r, "EXPECTED VALUE SUMMARY")
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Equal-Weighted Avg Price ($)")
+    cal(ws, f"C{r}",
+        f"=IFERROR((C{IMPLIED_ROW}+D{IMPLIED_ROW}+E{IMPLIED_ROW})/3,\"--\")",
+        FMT_USD2, bold=True)
+    ws.merge_cells(f"C{r}:E{r}")
+    ws[f"C{r}"].fill = Fill(LIGHT_BLUE)
+
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Expected Upside / (Downside) %")
+    cal(ws, f"C{r}",
+        f"=IFERROR((C{r-1}-D{CUR_ROW})/D{CUR_ROW},\"--\")",
+        FMT_PCT2, bold=True)
+    ws.merge_cells(f"C{r}:E{r}")
+    ws[f"C{r}"].fill = Fill(LIGHT_BLUE)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REVERSE DCF SHEET
+# ═══════════════════════════════════════════════════════════════════════════════
+def build_reverse_dcf(ws, CELLS):
+    A = CELLS
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions["B"].width = 18
+    for ci in range(3, 12):
+        ws.column_dimensions[get_column_letter(ci)].width = 12
+
+    ws.merge_cells("B1:K1")
+    sc(ws, "B1", "REVERSE DCF  -  Implied Growth Rate at Current Price",
+       bold=True, size=13, fc="FFFFFF", bg=NAVY, al=C)
+    row_h(ws, 1, 26)
+    ws.merge_cells("B2:K2")
+    sc(ws, "B2",
+       "  Find the column where implied price = current market price. "
+       "That growth rate is what the market is pricing in.",
+       size=9, italic=True, fc="404040", bg=LIGHT_BLUE, al=L)
+    row_h(ws, 2, 13)
+
+    WACC_C = A["DCF_WACC_REF"]
+    TVG_C  = A["DCF_TVG_REF"]
+    REV0   = A["A_REV0"]
+    ND     = f"({A['A_DEBT']}-{A['A_CASH']})"
+    SHARES = A["A_SHARES"]
+    FCF_M_FORMULA = (f"({A['A_EBITDA_M']}-{A['A_CAPEX']}-{A['A_NWC']}+{A['A_SBC']})"
+                     f"*(1-{A['A_TAX']})")
+
+    r = 4; row_h(ws, r, 17)
+    ws.merge_cells(f"B{r}:C{r}")
+    lbl(ws, f"B{r}", "  Target / Market Price ($)", bold=True)
+    inp(ws, f"D{r}", f"={A['A_PRICE']}", FMT_USD2)
+    ws.merge_cells(f"E{r}:K{r}")
+    sc(ws, f"E{r}", "  Edit D4 to test any price. Green = implied price >= D4 (potential buy).",
+       size=9, italic=True, fc="404040", bg=LIGHT_BLUE, al=L)
+    TARGET_CELL = f"D{r}"
+
+    r += 1; row_h(ws, r, 17)
+    ws.merge_cells(f"B{r}:C{r}")
+    lbl(ws, f"B{r}", "  FCF Margin (model-derived)")
+    cal(ws, f"D{r}", f"={FCF_M_FORMULA}", FMT_PCT2)
+    FCM_CELL = f"D{r}"
+    ws.merge_cells(f"E{r}:K{r}")
+    sc(ws, f"E{r}", "  Flows from Assumptions — edit margins there to see impact here.",
+       size=9, italic=True, fc="404040", bg=LIGHT_BLUE, al=L)
+
+    r += 1; row_h(ws, r, 17)
+    ws.merge_cells(f"B{r}:C{r}")
+    lbl(ws, f"B{r}", "  Terminal Growth Rate")
+    cal(ws, f"D{r}", f"={TVG_C}", FMT_PCT2)
+    TGR_CELL = f"D{r}"
+
+    GROWTH_RATES = [0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.15, 0.20]
+    WACC_OFFSETS = [-0.0150, -0.0100, -0.0050, 0.0000, +0.0050, +0.0100, +0.0150]
+
+    r += 2; row_h(ws, r, 16)
+    ws.merge_cells(f"B{r}:{get_column_letter(2+len(GROWTH_RATES))}{r}")
+    sc(ws, f"B{r}",
+       "  TABLE: Implied Share Price by Uniform Revenue Growth Rate x WACC"
+       " -- find where implied price = market price",
+       bold=True, size=9, fc="FFFFFF", bg=DARK_BLUE, al=L, bdr=thin_border)
+
+    r += 1; row_h(ws, r, 16)
+    sc(ws, f"B{r}", "  WACC \\ Growth", bold=True, size=8, fc="FFFFFF",
+       bg=MED_BLUE, al=C, bdr=thin_border)
+    GR_HDR_ROW = r
+    for j, gr in enumerate(GROWTH_RATES):
+        c = get_column_letter(3 + j)
+        sc(ws, f"{c}{r}", gr, fmt=FMT_PCT2)
+        ws[f"{c}{r}"].fill = Fill(MED_BLUE)
+        ws[f"{c}{r}"].font = F(bold=True, size=9, color="FFFFFF")
+        ws[f"{c}{r}"].alignment = C
+        ws[f"{c}{r}"].border = thin_border
+
+    from openpyxl.formatting.rule import ColorScaleRule
+    DATA_START = r + 1
+    for i, w_off in enumerate(WACC_OFFSETS):
+        r += 1; row_h(ws, r, 17)
+        cal(ws, f"B{r}", f"={WACC_C}+({w_off})", FMT_PCT2)
+        ws[f"B{r}"].fill = Fill(DARK_BLUE)
+        ws[f"B{r}"].font = F(bold=True, size=9, color="FFFFFF")
+        for j in range(len(GROWTH_RATES)):
+            c      = get_column_letter(3 + j)
+            gr_c   = f"{c}{GR_HDR_ROW}"
+            wc_c   = f"B{r}"
+            pv     = (f"SUMPRODUCT({REV0}*{FCM_CELL}"
+                      f"*(1+{gr_c})^{{1,2,3,4,5,6,7,8,9,10}},"
+                      f"1/(1+{wc_c})^{{1,2,3,4,5,6,7,8,9,10}})")
+            tv_    = (f"{REV0}*{FCM_CELL}*(1+{gr_c})^10"
+                      f"*(1+{TGR_CELL})/MAX({wc_c}-{TGR_CELL},0.0001)"
+                      f"/(1+{wc_c})^10")
+            formula = f"=IFERROR(({pv}+{tv_}-{ND})/{SHARES},\"--\")"
+            cal(ws, f"{c}{r}", formula, FMT_USD2)
+    DATA_END = r
+
+    rng = f"C{DATA_START}:{get_column_letter(2+len(GROWTH_RATES))}{DATA_END}"
+    ws.conditional_formatting.add(rng, ColorScaleRule(
+        start_type="min",  start_color="FFC7CE",
+        mid_type="percentile", mid_value=50, mid_color="FFEB9C",
+        end_type="max",    end_color="C6EFCE",
+    ))
+
+    r += 2; row_h(ws, r, 14)
+    ws.merge_cells(f"B{r}:K{r}")
+    sc(ws, f"B{r}",
+       "  HOW TO READ: Find your WACC row (0.00% offset = model WACC). "
+       "Scan right to find where implied price matches market price. "
+       "That column = market-implied growth rate.",
+       size=9, italic=True, fc="404040", bg=GRAY_LIGHT, al=L, bdr=thin_border)
+    r += 1; row_h(ws, r, 14)
+    ws.merge_cells(f"B{r}:K{r}")
+    sc(ws, f"B{r}",
+       "  This uses a UNIFORM growth rate for all 10 years. "
+       "For two-phase growth analysis, see the Scenarios sheet.",
+       size=9, italic=True, fc="404040", bg=GRAY_LIGHT, al=L, bdr=thin_border)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PRICE TRACKER SHEET
+# ═══════════════════════════════════════════════════════════════════════════════
+def build_price_tracker(ws, CELLS):
+    A = CELLS
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions["B"].width = 32
+    ws.column_dimensions["C"].width = 18
+    ws.column_dimensions["D"].width = 32
+    ws.column_dimensions["E"].width = 18
+
+    ws.merge_cells("B1:E1")
+    sc(ws, "B1", "PRICE TRACKER  -  Intraday Monitor", bold=True, size=13,
+       fc="FFFFFF", bg=NAVY, al=C)
+    row_h(ws, 1, 26)
+    ws.merge_cells("B2:E2")
+    sc(ws, "B2",
+       "  Run  python update_dcf.py TICKER  to refresh. "
+       "Gold cells = live data from Yahoo Finance. White = formulas.",
+       size=9, italic=True, fc="404040", bg=LIGHT_BLUE, al=L)
+    row_h(ws, 2, 13)
+
+    def psec(rr, label):
+        ws.merge_cells(f"B{rr}:E{rr}")
+        sc(ws, f"B{rr}", f"  {label}", bold=True, size=9, fc="FFFFFF",
+           bg=DARK_BLUE, al=L, bdr=thin_border)
+        row_h(ws, rr, 15)
+
+    # ── COMPANY ──────────────────────────────────────────────────────────────
+    r = 4; psec(r, "COMPANY")
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Ticker")
+    cal(ws, f"C{r}", f"={A['SS_TICKER']}", "@")
+    lbl(ws, f"D{r}", "  Company")
+    cal(ws, f"E{r}", f"={A['SS_NAME']}", "@")
+
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Beta (1-yr vs S&P 500)")
+    cal(ws, f"C{r}", f"={A['A_BETA']}", "0.00")
+    lbl(ws, f"D{r}", "  Last Updated")
+    cal(ws, f"E{r}", "=TEXT('Stock Search'!E5,\"YYYY-MM-DD\")", "@")
+
+    # ── SESSION PRICES ────────────────────────────────────────────────────────
+    # Row numbers must match what update_dcf.py writes to.
+    # Price!C9  = open price    (update_dcf.py)
+    # Price!E9  = market status (update_dcf.py)
+    # Price!C11 = session high  (update_dcf.py)
+    # Price!E11 = session low   (update_dcf.py)
+    r += 1; psec(r, "SESSION PRICES  (refreshed by update_dcf.py)")
+    r += 1; row_h(ws, r, 22)                              # row 9
+    lbl(ws, f"B{r}", "  Open ($)", bold=True, bg=LIGHT_BLUE)
+    inp(ws, f"C{r}", 0.00, FMT_USD2)
+    lbl(ws, f"D{r}", "  Market Status", bold=True, bg=LIGHT_BLUE)
+    inp(ws, f"E{r}", "UNKNOWN", "@")
+    OPEN_ROW = r
+
+    r += 1; row_h(ws, r, 22)                              # row 10
+    lbl(ws, f"B{r}", "  Current ($)", bold=True, bg=LIGHT_BLUE)
+    cal(ws, f"C{r}", f"={A['SS_PRICE']}", FMT_USD2, bold=True)
+    ws[f"C{r}"].fill = Fill(LIGHT_BLUE)
+    lbl(ws, f"D{r}", "  Change from Open ($)", bold=True, bg=LIGHT_BLUE)
+    cal(ws, f"E{r}", f"={A['SS_PRICE']}-C{OPEN_ROW}", FMT_USD2, bold=True)
+    ws[f"E{r}"].fill = Fill(LIGHT_BLUE)
+
+    r += 1; row_h(ws, r, 17)                              # row 11
+    lbl(ws, f"B{r}", "  Session High ($)")
+    inp(ws, f"C{r}", 0.00, FMT_USD2)
+    lbl(ws, f"D{r}", "  Session Low ($)")
+    inp(ws, f"E{r}", 0.00, FMT_USD2)
+    HIGH_ROW = r
+
+    r += 1; row_h(ws, r, 22)                              # row 12
+    lbl(ws, f"B{r}", "  Change from Open (%)", bold=True, bg=LIGHT_BLUE)
+    cal(ws, f"C{r}",
+        f"=IF(C{OPEN_ROW}=0,0,({A['SS_PRICE']}-C{OPEN_ROW})/C{OPEN_ROW})",
+        FMT_PCT2, bold=True)
+    ws[f"C{r}"].fill = Fill(LIGHT_BLUE)
+    lbl(ws, f"D{r}", "  High-Low Range ($)", bold=True, bg=LIGHT_BLUE)
+    cal(ws, f"E{r}", f"=C{HIGH_ROW}-E{HIGH_ROW}", FMT_USD2, bold=True)
+    ws[f"E{r}"].fill = Fill(LIGHT_BLUE)
+    CHG_PCT_REF = f"C{r}"
+
+    # ── 52-WEEK RANGE ─────────────────────────────────────────────────────────
+    r += 1; psec(r, "52-WEEK RANGE")
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  52-Week High ($)")
+    cal(ws, f"C{r}", "='Stock Search'!D8", FMT_USD2)
+    lbl(ws, f"D{r}", "  52-Week Low ($)")
+    cal(ws, f"E{r}", "='Stock Search'!E8", FMT_USD2)
+    W52_ROW = r
+
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  vs 52-Week High")
+    cal(ws, f"C{r}",
+        f"=IF(C{W52_ROW}=0,0,({A['SS_PRICE']}-C{W52_ROW})/C{W52_ROW})", FMT_PCT2)
+    lbl(ws, f"D{r}", "  vs 52-Week Low")
+    cal(ws, f"E{r}",
+        f"=IF(E{W52_ROW}=0,0,({A['SS_PRICE']}-E{W52_ROW})/E{W52_ROW})", FMT_PCT2)
+
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  52-Week Percentile  (100% = at 52W high)", italic=True)
+    cal(ws, f"C{r}",
+        f"=IFERROR(({A['SS_PRICE']}-E{W52_ROW})/(C{W52_ROW}-E{W52_ROW}),0)",
+        FMT_PCT)
+    ws.merge_cells(f"C{r}:E{r}")
+
+    # ── BETA-ADJUSTED PERFORMANCE ────────────────────────────────────────────
+    # Price!C20 = S&P 500 move today  (update_dcf.py)
+    r += 1; psec(r, "BETA-ADJUSTED PERFORMANCE  (vs S&P 500 today)")
+    r += 1; row_h(ws, r, 17)                              # row 20
+    lbl(ws, f"B{r}", "  S&P 500 Move Today (%)")
+    inp(ws, f"C{r}", 0.0000, FMT_PCT2)
+    lbl(ws, f"D{r}", "  (auto-filled by update_dcf.py)")
+    sc(ws, f"E{r}", "", bg=GRAY_LIGHT, bdr=thin_border)
+    SP_ROW = r
+
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Expected Move  (Beta x S&P move)")
+    cal(ws, f"C{r}", f"={A['A_BETA']}*C{SP_ROW}", FMT_PCT2)
+    lbl(ws, f"D{r}", "  Actual Move (vs open)")
+    cal(ws, f"E{r}", f"={CHG_PCT_REF}", FMT_PCT2)
+
+    r += 1; row_h(ws, r, 22)
+    lbl(ws, f"B{r}", "  Alpha Today  (actual - expected)", bold=True, bg=LIGHT_BLUE)
+    cal(ws, f"C{r}", f"={CHG_PCT_REF}-{A['A_BETA']}*C{SP_ROW}", FMT_PCT2, bold=True)
+    ws[f"C{r}"].fill = Fill(LIGHT_BLUE)
+    ws.merge_cells(f"C{r}:E{r}")
+
+    r += 1; row_h(ws, r, 14)
+    ws.merge_cells(f"B{r}:E{r}")
+    sc(ws, f"B{r}",
+       "  Alpha = actual stock move minus CAPM-predicted move (beta x market). "
+       "Positive alpha = stock outperformed its risk-adjusted expectation today.",
+       size=8, italic=True, fc="606060", bg=GRAY_LIGHT, al=L, bdr=thin_border)
+
+
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    ticker = sys.argv[1].upper() if len(sys.argv) > 1 else None
 
-    if ticker is None:
-        ans = input("  Enter ticker to auto-populate (or press Enter to skip): ").strip().upper()
-        ticker = ans or None
+def main():
+    parser = argparse.ArgumentParser(
+        description="Build a DCF Excel model, optionally pre-populated with stock data",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python build_dcf.py                        # interactive — prompts for ticker and date
+  python build_dcf.py AAPL                   # build + populate live data
+  python build_dcf.py AAPL --date 2020-03-23 # build + populate COVID crash data
+  python build_dcf.py AAPL --date 6/1/2026   # slash date format works too
+  python build_dcf.py AAPL --date 2008       # year-only → Dec 31 of that year
 
+Date formats:  2008  |  2020-03-23  |  6/1/2026  |  present
+        """,
+    )
+    parser.add_argument("ticker", nargs="?", default=None,
+                        help="Stock ticker — if provided, auto-populates the model")
+    parser.add_argument("--date", "-d", default=None,
+                        help="Historical reference date (YYYY, YYYY-MM-DD, M/D/YYYY, or 'present')")
+    parser.add_argument("--output", "-o", default=None,
+                        help="Output path — skips all prompts")
+    args = parser.parse_args()
+
+    interactive = (args.ticker is None)
+
+    # ── Resolve ticker ────────────────────────────────────────────────────────
+    if not args.ticker:
+        ans = input("  Ticker to populate (or press Enter for blank model): ").strip().upper()
+        if ans:
+            args.ticker = ans
+
+    ticker = args.ticker.upper() if args.ticker else None
+
+    # ── Resolve date ──────────────────────────────────────────────────────────
+    try:
+        from update_dcf import fetch_stock_data, update_excel, parse_date
+        _update_available = True
+    except ImportError:
+        _update_available = False
+
+    as_of = None
+    if args.date:
+        if not _update_available:
+            print("  update_dcf.py not found — cannot parse date.")
+            return
+        try:
+            as_of = parse_date(args.date)
+        except ValueError as exc:
+            print(f"  ERROR: {exc}")
+            return
+    elif ticker and interactive and not args.output:
+        print(f"\n  Build {ticker} with:")
+        print("    [1] Live data")
+        print("    [2] Historical date")
+        mode = input("  Choice [1]: ").strip()
+        if mode == "2":
+            date_str = input("  Date (YYYY, YYYY-MM-DD, or M/D/YYYY): ").strip()
+            if date_str:
+                try:
+                    as_of = parse_date(date_str)
+                except ValueError as exc:
+                    print(f"  ERROR: {exc}")
+                    return
+
+    # ── Resolve output path ───────────────────────────────────────────────────
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%I-%M%p")
-
-    if ticker:
-        name_options = [
-            f"DCF_Model_{ticker}_{stamp}.xlsx",
-            f"DCF_Model_{ticker}.xlsx",
-            f"DCF_Model_{stamp}.xlsx",
-            "DCF_Model.xlsx",
-        ]
+    if args.output:
+        out_path = args.output
     else:
-        name_options = [
-            f"DCF_Model_{stamp}.xlsx",
-            "DCF_Model.xlsx",
-        ]
+        if ticker:
+            if as_of:
+                name_options = [
+                    f"DCF_Model_{ticker}_{as_of.strftime('%Y-%m-%d')}.xlsx",
+                    f"DCF_Model_{ticker}_{stamp}.xlsx",
+                ]
+            else:
+                name_options = [
+                    f"DCF_Model_{ticker}_{stamp}.xlsx",
+                    f"DCF_Model_{ticker}.xlsx",
+                ]
+        else:
+            name_options = [
+                f"DCF_Model_{stamp}.xlsx",
+                "DCF_Model.xlsx",
+            ]
+        print(f"\n  Save as:")
+        for i, name in enumerate(name_options, 1):
+            print(f"    [{i}] {name}")
+        raw    = input("  Choice [1]: ").strip()
+        choice = int(raw) if raw.isdigit() and 1 <= int(raw) <= len(name_options) else 1
+        out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name_options[choice - 1])
 
-    print("\n  Save as:")
-    for i, name in enumerate(name_options, 1):
-        print(f"    [{i}] {name}")
-    raw = input(f"  Choice [1]: ").strip()
-    choice = int(raw) if raw.isdigit() and 1 <= int(raw) <= len(name_options) else 1
-    filename = name_options[choice - 1]
+    # ── Build and populate ────────────────────────────────────────────────────
+    path = build_dcf(output=out_path)
+    print(f"\n  Saved: {path}")
 
-    path = build_dcf(filename=filename)
-    print(f"\n  DCF Model created: {path}")
-
-    if ticker:
-        from update_dcf import fetch_stock_data, update_excel
-        print(f"  Fetching data for {ticker} from Yahoo Finance...")
-        data = fetch_stock_data(ticker)
+    if ticker and _update_available:
+        label = f"{ticker} as of {as_of}" if as_of else f"{ticker} (live)"
+        print(f"\n  Fetching {label} ...")
+        data = fetch_stock_data(ticker, as_of_date=as_of)
         update_excel(path, data)
+    elif ticker:
+        print("  update_dcf.py not found — open the model and populate manually.")
+    else:
+        fname = os.path.basename(out_path)
+        print(f"\n  Open {fname} and run  python update_dcf.py  to populate with any stock.")
 
-    print(f"\n  Next steps:")
-    print(f"    1. Open {filename} in Excel")
-    print( "    2. Edit gold cells in 'Assumptions' tab")
-    print( "    3. View implied price on 'DCF Valuation' tab")
-    print( "    4. Explore scenarios in 'Sensitivity' tab")
+
+if __name__ == "__main__":
+    main()

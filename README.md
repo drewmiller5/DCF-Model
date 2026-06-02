@@ -1,28 +1,32 @@
 # Professional DCF Valuation Model
 
-Currently freelancing. I earned my undergraduate degree in Accounting and Financial Technology from Elon University, and built a freelance real-time market platform to give users access to financial information.
+Currently freelancing. I studied undergrad in FinTech and Accoutning. Most people don't have access to Bloomberg Terminal, so I built one with real time access.
 
-One command. Any public company. Professional output.
+Two commands. Any public company. Professional output.
 
 ```bash
-python build_dcf.py AAPL     # builds DCF_Model.xlsx and populates live data
+python build_dcf.py AAPL     # build + populate in one shot
+python update_dcf.py         # refresh data on an existing model
 ```
 
 ---
 
 ## What You Get
 
-A 7-sheet Excel workbook. Color-coded, fully linked, no manual data entry required.
+A 10-sheet Excel workbook. Color-coded, fully linked, no manual data entry required.
 
 | Sheet | What it does |
 |---|---|
 | **Guide** | Color key and how to use it |
 | **Stock Search** | Live snapshot — price, market cap, revenue, debt, multiples |
 | **Assumptions** | Every input in one place. Gold cells = yours to edit |
-| **Income Statement** | 10-year revenue → EBITDA → FCFF projection |
+| **Income Statement** | 10-year revenue → EBITDA → FCFF projection with FCF chart |
 | **WACC** | CAPM cost of equity, after-tax cost of debt, blended WACC |
 | **DCF Valuation** | Discounted FCFs + terminal value → Enterprise Value → Implied Price |
 | **Sensitivity** | Implied price across WACC × TGR and EBITDA Margin × Revenue Growth |
+| **Scenarios** | Bear / Base / Bull side-by-side with implied prices |
+| **Reverse DCF** | What growth rate is the market currently pricing in |
+| **Price** | Intraday price tracker — open, high, low, alpha vs S&P 500 |
 
 Gold cells are inputs. White cells are formulas. Don't touch the white cells.
 
@@ -30,56 +34,65 @@ Gold cells are inputs. White cells are formulas. Don't touch the white cells.
 
 ## Install
 
-**Step 1 — Make sure Python is installed**
-
-Open a terminal (Mac: search "Terminal", Windows: search "Command Prompt") and run:
-
 ```bash
-python --version
+pip install -r requirements.txt
 ```
 
-You should see `Python 3.9` or higher. If you get an error, download Python at [python.org/downloads](https://python.org/downloads) — just click Install and keep all defaults.
-
-**Step 2 — Install the two required packages**
-
-```bash
-pip install openpyxl yfinance
-```
-
-That's it. You only need to do this once.
+Python 3.10+. That's it.
 
 ---
 
 ## Usage
 
-> **First time?** Open your terminal, navigate to the folder where you downloaded these files, then run the commands below. On Windows you can also right-click the folder and choose "Open in Terminal".
-
-### Step 1 — Build the model and load a stock
+### Build + populate in one shot
 
 ```bash
 python build_dcf.py AAPL
-python build_dcf.py MSFT
-python build_dcf.py NVDA
+python build_dcf.py MSFT --date 2020-03-23   # COVID crash low
+python build_dcf.py NVDA --date 2008         # financial crisis
+python build_dcf.py AAPL --date 6/1/2025     # slash date format works too
 ```
 
-Saves the file to the current directory, then pulls live data from Yahoo Finance and populates Stock Search and Assumptions with price, shares, debt, cash, beta, and revenue. Works with any ticker Yahoo supports.
+You'll be prompted to name the output file. The model is saved to the same folder as the script.
 
-No argument — it'll ask:
+### Refresh data on an existing model
 
 ```bash
-python build_dcf.py
-# Enter ticker to auto-populate (or press Enter to skip): TSLA
+python update_dcf.py
 ```
 
-To refresh an existing model with new data without rebuilding:
+Interactive flow — picks up your existing models automatically:
+
+```
+Found 2 DCF models:
+    [1] DCF_Model_AAPL_2026-06-02_11-09AM.xlsx  (AAPL)
+    [2] DCF_Model_Meta.xlsx  (META)
+
+  Pick a file [1]: 1
+  Ticker in file: AAPL. Use this? [Y/n]: y
+
+  Update AAPL with:
+    [1] Live data
+    [2] Historical date
+  Choice [1]:
+
+  Save as:
+    [1] Overwrite  DCF_Model_AAPL_2026-06-02_11-09AM.xlsx
+    [2] New file   DCF_Model_AAPL_2026-06-02_02-30PM.xlsx
+  Choice [1]:
+```
+
+Or skip the prompts entirely:
 
 ```bash
-python update_dcf.py AAPL
+python update_dcf.py AAPL                    # live data, overwrites newest file
+python update_dcf.py AAPL --date 2020-03-23  # historical
+python update_dcf.py AAPL --price-only       # quick price refresh only
 ```
 
-### Step 2 — Enter your thesis
+### Enter your thesis
 
-Open `DCF_Model.xlsx`. Go to **Assumptions**. Adjust the gold cells:
+Open the model. Go to **Assumptions**. Adjust the gold cells:
 
 - Revenue growth Y1–Y10
 - EBITDA and gross margins
@@ -89,10 +102,12 @@ Open `DCF_Model.xlsx`. Go to **Assumptions**. Adjust the gold cells:
 
 This is where your view of the business goes. The model is just the math.
 
-### Step 3 — Read the output
+### Read the output
 
 - **DCF Valuation** → Implied share price vs current price, upside/downside
 - **Sensitivity** → How the price moves across scenarios. Green = upside, red = downside.
+- **Scenarios** → Bear/base/bull implied prices side by side
+- **Reverse DCF** → Find what growth rate the market is pricing in at current price
 
 ---
 
@@ -101,13 +116,13 @@ This is where your view of the business goes. The model is just the math.
 ```
 build_dcf.py TICKER
       ↓
-Model built + live data populates Stock Search + Assumptions
+Fresh 10-sheet model populated with live data
       ↓
-You adjust growth rates and margins to reflect your thesis
+You adjust growth rates and margins in Assumptions
       ↓
 DCF Valuation shows implied price vs market
       ↓
-Sensitivity shows the range across assumptions
+update_dcf.py to refresh data anytime (keeps your thesis intact)
 ```
 
 ---
@@ -130,13 +145,16 @@ The Python script works with any Excel version.
 - International stocks (TSM, ASML, etc.): Yahoo returns financials in local currency. Convert manually.
 - The WACC cell in Assumptions pulls from the WACC sheet automatically. Don't overwrite it.
 - `yfinance` installs itself if it's missing.
-- The sample you see in Excel was built on 5/25/2026 and the stock was AAPL at close. This is a sample output just to show the accuracy of it. This sheet will not update often.
+
 ---
 
 ## Why I Built This
 
-This is made for a finance student, an analyst, or just someone who wants to run a real valuation without paying for Bloomberg. Enjoy it. 
+I did my undergraduate studies in accounting and fintech, and often in classes models like these are models I wish I had. The DCF model started as something I learned in Finance and now it's something I use frequently for my personal projects.
+
+If you're a finance student, an analyst, or just someone who wants to run a real valuation without paying for Bloomberg, this is for you. Go enjoy it. 
 
 ---
 
 *Python 3.13 · openpyxl · yfinance*
+# DCF-Model
