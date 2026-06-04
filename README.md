@@ -1,3 +1,5 @@
+## DISCLAIMER THIS IS NOT FINANCIAL ADVICE 
+
 # Professional DCF Valuation Model
 
 I'm currently freelancing and former Accounting & FinTech student at Elon University. Bloomberg Terminal is one of the most powerful financial tools in the world however people don't have access to it. I built a platform that delievers real-time financial data and analytics to everyone.
