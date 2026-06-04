@@ -1,6 +1,10 @@
+# Professional DCF Valuation Model
+
 ## DISCLAIMER THIS IS NOT FINANCIAL ADVICE 
 
-# Professional DCF Valuation Model
+This software is for research and educational purposes only. The outputs are model estimates and should not be considered predictions, guarantees, or investment recommendations. I am not a licensed financial advisor. Investment decisions should not be made based on the outputs of this model. Please consult with a qualified professional for financial advice. By using this software, you acknowledge that I assume no liability for any decisions made using it.
+
+---
 
 I'm currently freelancing and former Accounting & FinTech student at Elon University. Bloomberg Terminal is one of the most powerful financial tools in the world however people don't have access to it. I built a platform that delievers real-time financial data and analytics to everyone.
 
