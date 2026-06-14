@@ -5,11 +5,18 @@ Usage: python build_dcf.py [TICKER] [--date YYYY-MM-DD]
 Output: saved to the same directory as this script
 """
 
-import os, datetime, argparse, sys
+import os, json, datetime, argparse, sys
+import openpyxl
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, Reference
+
+if not openpyxl.__version__.startswith("3."):
+    raise RuntimeError(
+        f"openpyxl 3.x required (found {openpyxl.__version__}). "
+        "Pin openpyxl>=3.1.2,<4 in requirements.txt."
+    )
 
 # openpyxl 3.1.4+ bug: writes "Microsoft Excel Compatible / Openpyxl" into
 # app.xml, which triggers Excel's legacy chart rendering mode and causes axis
@@ -138,8 +145,8 @@ def build_dcf(output: str = "") -> str:
     build_is(ws_is, CELLS)         # uses CELLS, populates IS row addresses
     build_wacc(ws_wacc, CELLS)     # uses CELLS, populates CELLS["WACC"]
     build_dcf_sheet(ws_dcf, CELLS)
-    build_sensitivity(ws_sens, CELLS)
     build_scenarios(ws_scen, CELLS)
+    build_sensitivity(ws_sens, CELLS)
     build_reverse_dcf(ws_rdcf, CELLS)
     build_price_tracker(ws_price, CELLS)
 
@@ -154,6 +161,13 @@ def build_dcf(output: str = "") -> str:
         print("  Close the file and run the command again.")
         sys.exit(1)
     print(f"Saved: {out}")
+
+    # Write cell-address manifest so update_dcf.py never needs hardcoded row numbers
+    manifest = {k: v for k, v in CELLS.items() if isinstance(v, str)}
+    manifest_path = out.replace(".xlsx", "_manifest.json")
+    with open(manifest_path, "w") as mf:
+        json.dump(manifest, mf, indent=2)
+    print(f"Manifest: {manifest_path}")
     return out
 
 
@@ -397,7 +411,7 @@ def build_assum(ws, CELLS):
     CELLS["A_GROWTH"] = [CELLS[f"A_G{i}"] for i in range(1, 11)]
 
     r += 1
-    asec(r, "MARGIN ASSUMPTIONS")
+    asec(r, "MARGIN ASSUMPTIONS  ·  NWC source: Damodaran wcdata.html — pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/wcdata.html  (sector-specific benchmark auto-applied by update_dcf.py)")
     r += 1; arow(r, "Gross Margin %",       0.435, FMT_PCT2, "EBITDA Margin %",     0.335, FMT_PCT2)
     CELLS["A_GM"]    = f"Assumptions!C{r}"
     CELLS["A_EBITDA_M"] = f"Assumptions!E{r}"
@@ -411,14 +425,24 @@ def build_assum(ws, CELLS):
     CELLS["A_SBC"]   = f"Assumptions!C{r}"
 
     r += 1
-    asec(r, "WACC INPUTS")
-    r += 1; arow(r, "Risk-Free Rate (Rf)",  0.043, FMT_PCT2, "Equity Risk Premium", 0.055, FMT_PCT2)
+    asec(r, "WACC INPUTS  ·  Source: Damodaran Implied ERP — pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/histimpl.html  (2025: Rf=4.18%, ERP=4.23%)")
+    r += 1; arow(r, "Risk-Free Rate (Rf)",  0.0418, FMT_PCT2, "Equity Risk Premium", 0.0423, FMT_PCT2)
     CELLS["A_RF"]    = f"Assumptions!C{r}"
     CELLS["A_ERP"]   = f"Assumptions!E{r}"
     r += 1; arow(r, "Beta (Levered)",        1.20,  "0.00",  "Pre-Tax Cost of Debt",0.038, FMT_PCT2)
     CELLS["A_BETA"]  = f"Assumptions!C{r}"
     CELLS["A_KD"]    = f"Assumptions!E{r}"
-    r += 1; arow(r, "Debt / Total Capital", 0.18,  FMT_PCT2, "Equity / Capital",    0.82,  FMT_PCT2)
+    # Market-value derived weights — use Price × Shares for equity market cap
+    r += 1
+    row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Debt / Capital (Wd)  [market-value, auto-computed]")
+    price_c  = CELLS["A_PRICE"].split("!")[-1]
+    shares_c = CELLS["A_SHARES"].split("!")[-1]
+    debt_c   = CELLS["A_DEBT"].split("!")[-1]
+    we_formula = f"=({price_c}*{shares_c})/(({price_c}*{shares_c})+{debt_c})"
+    cal(ws, f"C{r}", f"=1-E{r}", FMT_PCT2)
+    lbl(ws, f"D{r}", "  Equity / Capital (We)  [Price × Shares / (Mkt Cap + Debt)]")
+    cal(ws, f"E{r}", we_formula, FMT_PCT2)
     CELLS["A_WD"]    = f"Assumptions!C{r}"
     CELLS["A_WE"]    = f"Assumptions!E{r}"
     r += 1
@@ -445,6 +469,21 @@ def build_assum(ws, CELLS):
     CELLS["A_REV_1"] = f"Assumptions!E{r}"
     r += 1; arow(r, "FY-2 Revenue ($M)",   348_000, FMT_USD, "", None, None)
     CELLS["A_REV_2"] = f"Assumptions!C{r}"
+
+    r += 1
+    asec(r, "ADVANCED SETTINGS  (change here — all sheets update automatically)")
+    r += 1; arow(r,
+        "Mid-Year Offset  (0 = yr-end, 0.5 = mid-yr)", 0.0, "0.0##",
+        "SBC Add-Back Scale  (1 = full, 0 = exclude)", 0.0, "0.0")
+    CELLS["A_MYC"]       = f"Assumptions!C{r}"
+    CELLS["A_SBC_SCALE"] = f"Assumptions!E{r}"
+    r += 1; row_h(ws, r, 13)
+    ws.merge_cells(f"B{r}:E{r}")
+    sc(ws, f"B{r}",
+       "  Mid-Year: 0 = cash flows arrive year-end (default) | 0.5 = mid-year convention "
+       "(raises implied price ~4–6%) | 0.3 or 0.7 also valid. "
+       "SBC: 1 = full add-back | 0.5 = partial | 0 = exclude (most conservative).",
+       size=8, italic=True, fc="404040", bg=GRAY_LIGHT, al=L, bdr=thin_border)
 
     r += 2
     asec(r, "INVESTMENT THESIS (free text)")
@@ -680,8 +719,8 @@ def build_is(ws, CELLS):
     # Hist: manual inputs
     inp(ws, f"C{r}", -3_200, FMT_USD)
     inp(ws, f"D{r}", -3_800, FMT_USD)
-    # LTM: use NWC % * Rev
-    cal(ws, f"E{r}", f"=-{A['A_NWC']}*E{REV_ROW}", FMT_USD)
+    # LTM: delta = NWC% × (RevLTM − RevFY-1) — change, not level
+    cal(ws, f"E{r}", f"=-{A['A_NWC']}*(E{REV_ROW}-D{REV_ROW})", FMT_USD)
     for gi in range(10):
         cur = col(3 + gi)
         prv = col(2 + gi)
@@ -708,11 +747,11 @@ def build_is(ws, CELLS):
        fc="FFFFFF", bg=NAVY, al=L, bdr=thin_border)
     for ci in range(13):
         cal(ws, f"{col(ci)}{r}",
-            f"={col(ci)}{NOPAT_ROW}"
+            f"=MAX(0,{col(ci)}{NOPAT_ROW}"
             f"+{col(ci)}{DA_BACK_ROW}"
             f"-{col(ci)}{CAPEX_ROW}"
             f"+{col(ci)}{NWC_ROW}"
-            f"+{col(ci)}{SBC_ROW}",
+            f"+{col(ci)}{SBC_ROW}*{A['A_SBC_SCALE']})",
             FMT_USD, bold=True)
         ws[f"{col(ci)}{r}"].fill = Fill(DARK_BLUE)
         ws[f"{col(ci)}{r}"].font = F(bold=True, color="FFFFFF")
@@ -822,17 +861,29 @@ def build_wacc(ws, CELLS):
             fn(ws, f"E{r}", v2, f2)
 
     r = 4
-    wsec(r, "COST OF EQUITY  -  CAPM:  Ke = Rf + beta x ERP")
+    wsec(r, "COST OF EQUITY  -  CAPM:  Ke = Rf + Beta x ERP  (Hamada re-levering)")
     r += 1; wrow(r, "Risk-Free Rate (Rf)", f"={A['A_RF']}",   FMT_PCT2,
                     "Equity Risk Premium",  f"={A['A_ERP']}",  FMT_PCT2)
-    r += 1; wrow(r, "Beta (Levered)",       f"={A['A_BETA']}", "0.00",  editable=False)
+    r += 1; wrow(r, "Beta (Levered, from market data)", f"={A['A_BETA']}", "0.00",  editable=False)
+    BETA_L_ROW = r
+
+    # Hamada equation: Beta_U = Beta_L / (1 + (1-t) * D/E)
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  Unlevered Beta  [Hamada: Beta_L / (1+(1-t)×Wd/We)]")
+    beta_u_formula = (f"={A['A_BETA']}/"
+                      f"(1+(1-{A['A_TAX']})*{A['A_WD']}/{A['A_WE']})")
+    cal(ws, f"C{r}", beta_u_formula, "0.000")
+    lbl(ws, f"D{r}", "  Re-levered Beta  [Beta_U × (1+(1-t)×Wd/We)]", italic=True)
+    beta_rl_formula = (f"=C{r}*(1+(1-{A['A_TAX']})*{A['A_WD']}/{A['A_WE']})")
+    cal(ws, f"E{r}", beta_rl_formula, "0.000")
+    BETA_RELEV_CELL = f"E{r}"
 
     r += 1
     row_h(ws, r, 20)
     ws.merge_cells(f"B{r}:D{r}")
     sc(ws, f"B{r}", "  COST OF EQUITY (Ke)", bold=True, size=11, fc="FFFFFF",
        bg=DARK_BLUE, al=L, bdr=thin_border)
-    ke_formula = f"={A['A_RF']}+{A['A_BETA']}*{A['A_ERP']}"
+    ke_formula = f"={A['A_RF']}+{BETA_RELEV_CELL}*{A['A_ERP']}"
     cal(ws, f"E{r}", ke_formula, FMT_PCT2, bold=True)
     ws[f"E{r}"].fill = Fill(MED_BLUE)
     ws[f"E{r}"].font = F(bold=True, size=11, color="FFFFFF")
@@ -1002,11 +1053,11 @@ def build_dcf_sheet(ws, CELLS):
     PERIOD_ROW = r
 
     r += 1; row_h(ws, r, 14)
-    lbl(ws, f"B{r}", "  Discount Factor  [1/(1+WACC)^t]")
+    lbl(ws, f"B{r}", "  Discount Factor  [1/(1+WACC)^(t − mid-yr offset)]")
     for i in range(10):
         c = get_column_letter(3 + i)
         p_cell = f"{get_column_letter(3+i)}{PERIOD_ROW}"
-        cal(ws, f"{c}{r}", f"=1/(1+{WACC_REF})^{p_cell}", "0.0000")
+        cal(ws, f"{c}{r}", f"=1/(1+{WACC_REF})^({p_cell}-{A['A_MYC']})", "0.0000")
     DF_ROW = r
 
     r += 1; row_h(ws, r, 17)
@@ -1030,16 +1081,16 @@ def build_dcf_sheet(ws, CELLS):
     lbl(ws, f"B{r}", "  Gordon Growth TV = FCFF_Y10 * (1+g) / (WACC - g)")
     yr10_fcf = f"L{FCFF_PROJ_ROW}"  # col L = ci=9 = Y10
     cal(ws, f"C{r}",
-        f"={yr10_fcf}*(1+{TVG_REF})/({WACC_REF}-{TVG_REF})", FMT_USD)
+        f"={yr10_fcf}*(1+{TVG_REF})/MAX({WACC_REF}-{TVG_REF},0.01)", FMT_USD)
     lbl(ws, f"D{r}", "  PV of TV (Gordon Growth)")
-    cal(ws, f"E{r}", f"=C{r}/(1+{WACC_REF})^10", FMT_USD, bold=True)
+    cal(ws, f"E{r}", f"=C{r}/(1+{WACC_REF})^(10-{A['A_MYC']})", FMT_USD, bold=True)
     TV_GGM_ROW = r; PV_TV_GGM = f"E{r}"
 
     r += 1; row_h(ws, r, 17)
-    lbl(ws, f"B{r}", "  Exit Multiple TV = EBITDA_Y10 x Multiple  [reference only]")
-    cal(ws, f"C{r}", f"={EBITDA_Y10}*{TVMUL_REF}", FMT_USD)
+    lbl(ws, f"B{r}", "  Exit Multiple TV = EBITDA_Y11 x Multiple  [forward; reference only]")
+    cal(ws, f"C{r}", f"={EBITDA_Y10}*(1+{TVG_REF})*{TVMUL_REF}", FMT_USD)
     lbl(ws, f"D{r}", "  PV of TV (Exit Multiple)")
-    cal(ws, f"E{r}", f"=C{r}/(1+{WACC_REF})^10", FMT_USD)
+    cal(ws, f"E{r}", f"=C{r}/(1+{WACC_REF})^(10-{A['A_MYC']})", FMT_USD)
 
     # Valuation bridge
     r += 1; dsec(r, "VALUATION BRIDGE")
@@ -1069,7 +1120,7 @@ def build_dcf_sheet(ws, CELLS):
     r += 1; row_h(ws, r, 22)
     sc(ws, f"B{r}", "  EQUITY VALUE", bold=True, size=12, fc="FFFFFF",
        bg=DARK_BLUE, al=L, bdr=thin_border)
-    cal(ws, f"C{r}", f"={EV_CELL}-{ND_REF}", FMT_USD, bold=True)
+    cal(ws, f"C{r}", f"=MAX(0,{EV_CELL}-{ND_REF})", FMT_USD, bold=True)
     ws[f"C{r}"].fill = Fill(DARK_BLUE); ws[f"C{r}"].font = F(bold=True, size=12, color="FFFFFF")
     EQ_CELL = f"C{r}"
 
@@ -1176,19 +1227,18 @@ def build_sensitivity(ws, CELLS):
             c = get_column_letter(3 + j)
             wacc_c = f"B{r}"
             tgr_c  = f"{get_column_letter(3+j)}{TGR_HDR_ROW}"
-            # Full DCF formula parameterized by WACC and TGR
-            # SUMPRODUCT discounts each year's FCF, then adds GGM terminal value
+            # Full DCF parameterized by WACC and TGR; mid-year offset from Assumptions
+            myc     = A["A_MYC"]
             fcf_range = f"'Income Statement'!F{IS_FCFF_ROW}:O{IS_FCFF_ROW}"
             pv_fcf = (
                 f"SUMPRODUCT({fcf_range},"
-                f"1/(1+{wacc_c})^{{1,2,3,4,5,6,7,8,9,10}})"
+                f"1/(1+{wacc_c})^({{1,2,3,4,5,6,7,8,9,10}}-{myc}))"
             )
-            # Y10 FCF (col O = 10th projected year)
             fcf_y10 = f"'Income Statement'!O{IS_FCFF_ROW}"
-            tv_ggm  = f"{fcf_y10}*(1+{tgr_c})/MAX({wacc_c}-{tgr_c},0.0001)"
-            pv_tv   = f"{tv_ggm}/(1+{wacc_c})^10"
+            tv_ggm  = f"{fcf_y10}*(1+{tgr_c})/MAX({wacc_c}-{tgr_c},0.01)"
+            pv_tv   = f"{tv_ggm}/(1+{wacc_c})^(10-{myc})"
             formula = (
-                f"=IFERROR(({pv_fcf}+{pv_tv}-{NETD})/{SOUT},\"—\")"
+                f"=IFERROR(MAX(0,{pv_fcf}+{pv_tv}-{NETD})/{SOUT},\"—\")"
             )
             cal(ws, f"{c}{r}", formula, FMT_USD2)
     DATA1_END = r
@@ -1203,11 +1253,14 @@ def build_sensitivity(ws, CELLS):
     rng1 = f"C{DATA1_START}:{get_column_letter(2+len(TVG_OFFSETS))}{DATA1_END}"
     ws.conditional_formatting.add(rng1, cs1)
 
-    # Table 2: EBITDA margin vs Revenue growth
+    # Table 2: Full DCF per cell — EBITDA margin vs uniform revenue growth
+    # Uses correct FCF margin = (EBITDA%-D&A%)*(1-t) + D&A% - CapEx% - ΔNwc% + SBC%*scale
+    # Growth rate is applied uniformly across all 10 projection years (stated in header).
     r += 2
     ws.merge_cells(f"B{r}:H{r}")
     sc(ws, f"B{r}",
-       "  TABLE 2 - Implied Share Price  vs  EBITDA Margin  x  Y1 Revenue Growth",
+       "  TABLE 2 - Implied Share Price  vs  EBITDA Margin  x  Uniform Revenue Growth"
+       "  [full DCF re-calc per cell; growth applied to all 10 yrs]",
        bold=True, size=10, fc="FFFFFF", bg=DARK_BLUE, al=L, bdr=thin_border)
     row_h(ws, r, 16)
 
@@ -1215,11 +1268,24 @@ def build_sensitivity(ws, CELLS):
     GROWTH_OFFSETS = [-0.03, -0.02, -0.01, 0.00, +0.01, +0.02, +0.03]
 
     r += 1; row_h(ws, r, 16)
-    sc(ws, f"B{r}", "  Rev Gr\\EBITDA%", bold=True, size=8, fc="FFFFFF",
+    sc(ws, f"B{r}", "  Gr\\EBITDA%", bold=True, size=8, fc="FFFFFF",
        bg=MED_BLUE, al=C, bdr=thin_border)
     MRG_HDR_ROW = r
     A_EBITDA_M_REF = A["A_EBITDA_M"]
     A_G1_REF       = A["A_G1"]
+    myc  = A["A_MYC"]
+    da   = A["A_DA"]
+    tax  = A["A_TAX"]
+    cap  = A["A_CAPEX"]
+    nwc  = A["A_NWC"]
+    sbc  = A["A_SBC"]
+    sbc_s = A["A_SBC_SCALE"]
+    rev0 = A["A_REV0"]
+    netd = f"({A['A_DEBT']}-{A['A_CASH']})"
+    sout = A["A_SHARES"]
+    wacc_t2 = A["DCF_WACC_REF"]
+    tvg_t2  = A["DCF_TVG_REF"]
+
     for j, offset in enumerate(MARGIN_OFFSETS):
         c = get_column_letter(3 + j)
         ws.column_dimensions[c].width = 13
@@ -1233,20 +1299,23 @@ def build_sensitivity(ws, CELLS):
         cal(ws, f"B{r}", f"={A_G1_REF}+({g_off})", FMT_PCT)
         ws[f"B{r}"].fill = Fill(DARK_BLUE)
         ws[f"B{r}"].font = F(bold=True, size=9, color="FFFFFF")
-        for j, m_off in enumerate(MARGIN_OFFSETS):
-            c       = get_column_letter(3 + j)
-            g_cell  = f"B{r}"
-            m_cell  = f"{get_column_letter(3+j)}{MRG_HDR_ROW}"
-            base_implied = IMPLIED
-            base_g       = A_G1_REF
-            base_m       = A_EBITDA_M_REF
-            # Ratio adjustment: adjust implied price proportionally to revenue and margin changes
-            formula = (
-                f"=IFERROR({base_implied}"
-                f"*((1+{g_cell})/(1+{base_g}))"
-                f"*({m_cell}/{base_m})"
-                f",\"—\")"
-            )
+        for j in range(len(MARGIN_OFFSETS)):
+            c      = get_column_letter(3 + j)
+            g_cell = f"B{r}"
+            m_cell = f"{get_column_letter(3+j)}{MRG_HDR_ROW}"
+            # FCF margin: correct formula with D&A tax shield
+            # ΔNwc ≈ NwcPct × g/(1+g) per year (% of current-yr revenue)
+            fcf_m  = (f"(({m_cell})-({da}))*(1-({tax}))"
+                      f"+({da})-({cap})"
+                      f"-({nwc})*({g_cell})/(1+({g_cell}))"
+                      f"+({sbc})*({sbc_s})")
+            pv_fcf = (f"SUMPRODUCT(({rev0})*({fcf_m})*(1+({g_cell}))^{{1,2,3,4,5,6,7,8,9,10}},"
+                      f"1/(1+{wacc_t2})^({{1,2,3,4,5,6,7,8,9,10}}-{myc}))")
+            fcf_y10 = f"({rev0})*({fcf_m})*(1+({g_cell}))^10"
+            tv_t2   = (f"{fcf_y10}*(1+({tvg_t2}))"
+                       f"/MAX({wacc_t2}-({tvg_t2}),0.01)"
+                       f"/(1+{wacc_t2})^(10-{myc})")
+            formula = f"=IFERROR(MAX(0,{pv_fcf}+{tv_t2}-{netd})/{sout},\"—\")"
             cal(ws, f"{c}{r}", formula, FMT_USD2)
     DATA2_END = r
 
@@ -1268,12 +1337,13 @@ def build_sensitivity(ws, CELLS):
         ws.column_dimensions[c].width = 18 if c in ["B","F"] else 13
         hdr_cell(ws, f"{c}{r}", hdr_t, bg=MED_BLUE, size=9)
 
+    BEAR_PX = A["SCEN_BEAR_PRICE"]
+    BULL_PX = A["SCEN_BULL_PRICE"]
     football_rows = [
-        ("DCF  (base case)",         IMPLIED,            IMPLIED,                     CUR_PX, "Gordon Growth TV"),
-        ("DCF  (bull: FCF+15%)",     f"{IMPLIED}*1.12",  f"{IMPLIED}*1.22",           CUR_PX, "Upside scenario"),
-        ("DCF  (bear: FCF-15%)",     f"{IMPLIED}*0.78",  f"{IMPLIED}*0.90",           CUR_PX, "Downside scenario"),
-        ("EV/EBITDA  (18-22x LTM)",  f"={IS_EBITDA_Y10}*18/{SOUT}", f"={IS_EBITDA_Y10}*22/{SOUT}", CUR_PX, "Exit multiple"),
-        ("Current price  (mkt)",     CUR_PX,             CUR_PX,                      CUR_PX, "Market quote"),
+        ("DCF  (base case)",          IMPLIED,    IMPLIED,    CUR_PX, "Gordon Growth TV"),
+        ("DCF  scenarios (Bear→Bull)", BEAR_PX,   BULL_PX,   CUR_PX, "Linked from Scenarios sheet"),
+        ("EV/EBITDA  (18-22x fwd)",   f"={IS_EBITDA_Y10}*(1+{TVG_C})*18/{SOUT}", f"={IS_EBITDA_Y10}*(1+{TVG_C})*22/{SOUT}", CUR_PX, "Forward EBITDA × multiple"),
+        ("Current price  (mkt)",      CUR_PX,     CUR_PX,    CUR_PX, "Market quote"),
     ]
     for method, low, high, cur, note in football_rows:
         r += 1; row_h(ws, r, 17)
@@ -1322,26 +1392,51 @@ def build_scenarios(ws, CELLS):
     def srow(rr, label, c_val, d_formula, e_val, fmt):
         row_h(ws, rr, 17)
         lbl(ws, f"B{rr}", f"  {label}")
-        inp(ws, f"C{rr}", c_val, fmt)
+        if isinstance(c_val, str) and c_val.startswith("="):
+            cal(ws, f"C{rr}", c_val, fmt)
+        else:
+            inp(ws, f"C{rr}", c_val, fmt)
         cal(ws, f"D{rr}", d_formula, fmt)
-        inp(ws, f"E{rr}", e_val, fmt)
+        if isinstance(e_val, str) and e_val.startswith("="):
+            cal(ws, f"E{rr}", e_val, fmt)
+        else:
+            inp(ws, f"E{rr}", e_val, fmt)
+
+    _g15  = f"({A['A_G1']}+{A['A_G2']}+{A['A_G3']}+{A['A_G4']}+{A['A_G5']})/5"
+    _g610 = f"({A['A_G6']}+{A['A_G7']}+{A['A_G8']}+{A['A_G9']}+{A['A_G10']})/5"
+    _tvg  = A['A_TVG']
 
     r += 1; ssec(r, "REVENUE GROWTH")
-    r += 1; srow(r, "Y1-Y5 Revenue Growth (avg)", 0.030,
-                 f"=({A['A_G1']}+{A['A_G2']}+{A['A_G3']}+{A['A_G4']}+{A['A_G5']})/5",
-                 0.100, FMT_PCT2)
+    r += 1; srow(r, "Y1-Y5 Revenue Growth (avg)",
+                 f"=MAX({_g15}-0.03,{_tvg})",
+                 f"={_g15}",
+                 f"=MIN({_g15}+0.04,0.80)", FMT_PCT2)
     G15_ROW = r
 
-    r += 1; srow(r, "Y6-Y10 Revenue Growth (avg)", 0.015,
-                 f"=({A['A_G6']}+{A['A_G7']}+{A['A_G8']}+{A['A_G9']}+{A['A_G10']})/5",
-                 0.060, FMT_PCT2)
+    r += 1; srow(r, "Y6-Y10 Revenue Growth (avg)",
+                 f"=MAX({_g610}-0.02,{_tvg})",
+                 f"={_g610}",
+                 f"=MIN({_g610}+0.03,0.60)", FMT_PCT2)
     G610_ROW = r
 
     r += 1; ssec(r, "MARGIN & DISCOUNT RATE")
-    r += 1; srow(r, "EBITDA Margin %", 0.260, f"={A['A_EBITDA_M']}", 0.400, FMT_PCT2)
-    r += 1; srow(r, "FCF Margin (% of Revenue)", 0.175,
-                 f"=({A['A_EBITDA_M']}-{A['A_CAPEX']}-{A['A_NWC']}+{A['A_SBC']})*(1-{A['A_TAX']})",
-                 0.270, FMT_PCT2)
+    r += 1; srow(r, "EBITDA Margin %",
+                 f"=MAX({A['A_EBITDA_M']}-0.05,0.03)",
+                 f"={A['A_EBITDA_M']}",
+                 f"=MIN({A['A_EBITDA_M']}+0.08,0.85)", FMT_PCT2)
+    EBITDA_M_SCEN_ROW = r
+
+    # FCF margin computed for all three columns — Bear/Bull use their own EBITDA margin
+    r += 1; row_h(ws, r, 17)
+    lbl(ws, f"B{r}", "  FCF Margin (% of Revenue)")
+    _da = A['A_DA']; _tax = A['A_TAX']; _cap = A['A_CAPEX']
+    _nwc = A['A_NWC']; _sbc = A['A_SBC']; _ss = A['A_SBC_SCALE']
+    for _col, _ebitda in [("C", f"C{EBITDA_M_SCEN_ROW}"),
+                           ("D", f"D{EBITDA_M_SCEN_ROW}"),
+                           ("E", f"E{EBITDA_M_SCEN_ROW}")]:
+        cal(ws, f"{_col}{r}",
+            f"=MAX(0,({_ebitda}-{_da})*(1-{_tax})+{_da}-{_cap}-{_nwc}+{_sbc}*{_ss})",
+            FMT_PCT2)
     FCF_M_ROW = r
 
     r += 1; srow(r, "WACC", 0.110, f"={A['WACC_CELL']}", 0.080, FMT_PCT2)
@@ -1370,6 +1465,7 @@ def build_scenarios(ws, CELLS):
     sc(ws, f"B{r}", "  IMPLIED SHARE PRICE", bold=True, size=13,
        fc="FFFFFF", bg=NAVY, al=L, bdr=thin_border)
 
+    myc_scen = A["A_MYC"]
     for scen_col, bg in [("C", "C00000"), ("D", DARK_BLUE), ("E", "375623")]:
         g1  = f"{scen_col}{G15_ROW}"
         g2  = f"{scen_col}{G610_ROW}"
@@ -1380,16 +1476,18 @@ def build_scenarios(ws, CELLS):
         nd  = f"{scen_col}{ND_ROW}"
         sh  = f"{scen_col}{SOUT_ROW}"
         pv1 = (f"SUMPRODUCT({r0}*{fm}*(1+{g1})^{{1,2,3,4,5}},"
-               f"1/(1+{wc})^{{1,2,3,4,5}})")
+               f"1/(1+{wc})^({{1,2,3,4,5}}-{myc_scen}))")
         pv2 = (f"SUMPRODUCT({r0}*{fm}*(1+{g1})^5*(1+{g2})^{{1,2,3,4,5}},"
-               f"1/(1+{wc})^{{6,7,8,9,10}})")
+               f"1/(1+{wc})^({{6,7,8,9,10}}-{myc_scen}))")
         tv  = (f"{r0}*{fm}*(1+{g1})^5*(1+{g2})^5"
-               f"*(1+{tgr})/MAX({wc}-{tgr},0.0001)/(1+{wc})^10")
-        formula = f"=IFERROR(({pv1}+{pv2}+{tv}-{nd})/{sh},\"--\")"
+               f"*(1+{tgr})/MAX({wc}-{tgr},0.01)/(1+{wc})^(10-{myc_scen})")
+        formula = f"=IFERROR(MAX(0,{pv1}+{pv2}+{tv}-{nd})/{sh},\"--\")"
         cal(ws, f"{scen_col}{r}", formula, FMT_USD2, bold=True)
         ws[f"{scen_col}{r}"].fill = Fill(bg)
         ws[f"{scen_col}{r}"].font = F(bold=True, size=14, color="FFFFFF")
     IMPLIED_ROW = r
+    CELLS["SCEN_BEAR_PRICE"] = f"Scenarios!C{IMPLIED_ROW}"
+    CELLS["SCEN_BULL_PRICE"] = f"Scenarios!E{IMPLIED_ROW}"
 
     r += 1; row_h(ws, r, 17)
     lbl(ws, f"B{r}", "  Current Market Price ($)")
@@ -1428,19 +1526,24 @@ def build_scenarios(ws, CELLS):
 # ═══════════════════════════════════════════════════════════════════════════════
 def build_reverse_dcf(ws, CELLS):
     A = CELLS
+    GROWTH_RATES = [0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60]
+    WACC_OFFSETS = [-0.0150, -0.0100, -0.0050, 0.0000, +0.0050, +0.0100, +0.0150]
+    _LAST_COL = get_column_letter(2 + len(GROWTH_RATES))
+
     ws.column_dimensions["A"].width = 2
     ws.column_dimensions["B"].width = 18
-    for ci in range(3, 12):
-        ws.column_dimensions[get_column_letter(ci)].width = 12
+    for ci in range(3, 3 + len(GROWTH_RATES)):
+        ws.column_dimensions[get_column_letter(ci)].width = 10   # dynamic — adjusts if GROWTH_RATES changes
 
-    ws.merge_cells("B1:K1")
+    ws.merge_cells(f"B1:{_LAST_COL}1")
     sc(ws, "B1", "REVERSE DCF  -  Implied Growth Rate at Current Price",
        bold=True, size=13, fc="FFFFFF", bg=NAVY, al=C)
     row_h(ws, 1, 26)
-    ws.merge_cells("B2:K2")
+    ws.merge_cells(f"B2:{_LAST_COL}2")
     sc(ws, "B2",
        "  Find the column where implied price = current market price. "
-       "That growth rate is what the market is pricing in.",
+       "That growth rate is what the market is pricing in.  "
+       "Range: 2% - 60% to cover both mature and high-growth companies.",
        size=9, italic=True, fc="404040", bg=LIGHT_BLUE, al=L)
     row_h(ws, 2, 13)
 
@@ -1449,14 +1552,14 @@ def build_reverse_dcf(ws, CELLS):
     REV0   = A["A_REV0"]
     ND     = f"({A['A_DEBT']}-{A['A_CASH']})"
     SHARES = A["A_SHARES"]
-    FCF_M_FORMULA = (f"({A['A_EBITDA_M']}-{A['A_CAPEX']}-{A['A_NWC']}+{A['A_SBC']})"
-                     f"*(1-{A['A_TAX']})")
+    FCF_M_FORMULA = (f"({A['A_EBITDA_M']}-{A['A_DA']})*(1-{A['A_TAX']})"
+                     f"+{A['A_DA']}-{A['A_CAPEX']}-{A['A_NWC']}+{A['A_SBC']}*{A['A_SBC_SCALE']}")
 
     r = 4; row_h(ws, r, 17)
     ws.merge_cells(f"B{r}:C{r}")
     lbl(ws, f"B{r}", "  Target / Market Price ($)", bold=True)
     inp(ws, f"D{r}", f"={A['A_PRICE']}", FMT_USD2)
-    ws.merge_cells(f"E{r}:K{r}")
+    ws.merge_cells(f"E{r}:{_LAST_COL}{r}")
     sc(ws, f"E{r}", "  Edit D4 to test any price. Green = implied price >= D4 (potential buy).",
        size=9, italic=True, fc="404040", bg=LIGHT_BLUE, al=L)
     TARGET_CELL = f"D{r}"
@@ -1464,9 +1567,9 @@ def build_reverse_dcf(ws, CELLS):
     r += 1; row_h(ws, r, 17)
     ws.merge_cells(f"B{r}:C{r}")
     lbl(ws, f"B{r}", "  FCF Margin (model-derived)")
-    cal(ws, f"D{r}", f"={FCF_M_FORMULA}", FMT_PCT2)
+    cal(ws, f"D{r}", f"=MAX(0,{FCF_M_FORMULA})", FMT_PCT2)
     FCM_CELL = f"D{r}"
-    ws.merge_cells(f"E{r}:K{r}")
+    ws.merge_cells(f"E{r}:{_LAST_COL}{r}")
     sc(ws, f"E{r}", "  Flows from Assumptions — edit margins there to see impact here.",
        size=9, italic=True, fc="404040", bg=LIGHT_BLUE, al=L)
 
@@ -1475,9 +1578,6 @@ def build_reverse_dcf(ws, CELLS):
     lbl(ws, f"B{r}", "  Terminal Growth Rate")
     cal(ws, f"D{r}", f"={TVG_C}", FMT_PCT2)
     TGR_CELL = f"D{r}"
-
-    GROWTH_RATES = [0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.15, 0.20]
-    WACC_OFFSETS = [-0.0150, -0.0100, -0.0050, 0.0000, +0.0050, +0.0100, +0.0150]
 
     r += 2; row_h(ws, r, 16)
     ws.merge_cells(f"B{r}:{get_column_letter(2+len(GROWTH_RATES))}{r}")
@@ -1505,17 +1605,18 @@ def build_reverse_dcf(ws, CELLS):
         cal(ws, f"B{r}", f"={WACC_C}+({w_off})", FMT_PCT2)
         ws[f"B{r}"].fill = Fill(DARK_BLUE)
         ws[f"B{r}"].font = F(bold=True, size=9, color="FFFFFF")
+        myc_rdcf = A["A_MYC"]
         for j in range(len(GROWTH_RATES)):
             c      = get_column_letter(3 + j)
             gr_c   = f"{c}{GR_HDR_ROW}"
             wc_c   = f"B{r}"
             pv     = (f"SUMPRODUCT({REV0}*{FCM_CELL}"
                       f"*(1+{gr_c})^{{1,2,3,4,5,6,7,8,9,10}},"
-                      f"1/(1+{wc_c})^{{1,2,3,4,5,6,7,8,9,10}})")
+                      f"1/(1+{wc_c})^({{1,2,3,4,5,6,7,8,9,10}}-{myc_rdcf}))")
             tv_    = (f"{REV0}*{FCM_CELL}*(1+{gr_c})^10"
-                      f"*(1+{TGR_CELL})/MAX({wc_c}-{TGR_CELL},0.0001)"
-                      f"/(1+{wc_c})^10")
-            formula = f"=IFERROR(({pv}+{tv_}-{ND})/{SHARES},\"--\")"
+                      f"*(1+{TGR_CELL})/MAX({wc_c}-{TGR_CELL},0.01)"
+                      f"/(1+{wc_c})^(10-{myc_rdcf})")
+            formula = f"=IFERROR(MAX(0,{pv}+{tv_}-{ND})/{SHARES},\"--\")"
             cal(ws, f"{c}{r}", formula, FMT_USD2)
     DATA_END = r
 
@@ -1527,14 +1628,14 @@ def build_reverse_dcf(ws, CELLS):
     ))
 
     r += 2; row_h(ws, r, 14)
-    ws.merge_cells(f"B{r}:K{r}")
+    ws.merge_cells(f"B{r}:{_LAST_COL}{r}")
     sc(ws, f"B{r}",
        "  HOW TO READ: Find your WACC row (0.00% offset = model WACC). "
        "Scan right to find where implied price matches market price. "
        "That column = market-implied growth rate.",
        size=9, italic=True, fc="404040", bg=GRAY_LIGHT, al=L, bdr=thin_border)
     r += 1; row_h(ws, r, 14)
-    ws.merge_cells(f"B{r}:K{r}")
+    ws.merge_cells(f"B{r}:{_LAST_COL}{r}")
     sc(ws, f"B{r}",
        "  This uses a UNIFORM growth rate for all 10 years. "
        "For two-phase growth analysis, see the Scenarios sheet.",

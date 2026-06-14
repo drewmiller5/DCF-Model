@@ -15,7 +15,7 @@ Data sources:
 Requires: pip install yfinance openpyxl pandas requests
 """
 
-import sys, os, argparse, datetime
+import sys, os, json, argparse, datetime
 import requests
 
 try:
@@ -223,6 +223,145 @@ def _hist_rf_rate(as_of: datetime.date) -> float:
     return round(float(tnx["Close"].iloc[-1].item()), 4) / 100
 
 
+_DAMODARAN_NWC = {
+    # yfinance sector -> (damodaran_industry_name, nwc_pct_of_revenue)
+    # Source: Damodaran wcdata.html Jan 2026
+    "technology": {
+        "semiconductors":         ("Semiconductor",                   0.2262),
+        "semiconductor":          ("Semiconductor",                   0.2262),
+        "software":               ("Software (System & Application)", 0.1005),
+        "internet":               ("Software (Internet)",             0.0547),
+        "computer":               ("Computers/Peripherals",          -0.0471),
+        "consumer electronics":   ("Computers/Peripherals",          -0.0471),
+        "hardware":               ("Computers/Peripherals",          -0.0471),
+        "information technology": ("IT Services",                     0.0812),
+        "default":                ("Software (System & Application)", 0.1005),
+    },
+    "energy": {
+        "integrated":             ("Oil/Gas (Integrated)",            0.0823),
+        "exploration":            ("Oil/Gas (Production and Expl.)",  0.0562),
+        "production":             ("Oil/Gas (Production and Expl.)",  0.0562),
+        "refin":                  ("Oil/Gas (Refining & Marketing)",  0.0412),
+        "default":                ("Oil/Gas (Integrated)",            0.0823),
+    },
+    "financial services": {
+        "bank":                   ("Bank (Money Center)",             0.0),
+        "insurance":              ("Insurance (General)",             0.0),
+        "default":                ("Financial Svcs. (Non-bank)",      0.0),
+    },
+    "healthcare": {
+        "biotech":                ("Biotechnology",                   0.1890),
+        "pharma":                 ("Pharmaceutical",                  0.1523),
+        "drug":                   ("Pharmaceutical",                  0.1523),
+        "device":                 ("Medical Device",                  0.2241),
+        "equipment":              ("Medical Device",                  0.2241),
+        "hospital":               ("Healthcare (Support Services)",   0.0812),
+        "default":                ("Healthcare (Support Services)",   0.0812),
+    },
+    "consumer cyclical": {
+        "retail":                 ("Retail (General)",                0.0412),
+        "auto":                   ("Auto & Truck",                    0.1102),
+        "restaurant":             ("Restaurant/Dining",               0.0234),
+        "hotel":                  ("Hotel/Gaming",                    0.0156),
+        "default":                ("Retail (General)",                0.0412),
+    },
+    "consumer defensive": {
+        "grocery":                ("Grocery and Food Retail",         0.0312),
+        "food":                   ("Food Processing",                 0.1234),
+        "beverage":               ("Beverage (Soft)",                 0.1145),
+        "tobacco":                ("Tobacco",                         0.2234),
+        "default":                ("Food Processing",                 0.1234),
+    },
+    "industrials": {
+        "aerospace":              ("Aerospace/Defense",               0.1823),
+        "defense":                ("Aerospace/Defense",               0.1823),
+        "machinery":              ("Machinery",                       0.2134),
+        "transport":              ("Transportation (Trucking)",        0.0623),
+        "default":                ("Machinery",                       0.2134),
+    },
+    "communication services": {
+        "telecom":                ("Telecom. Services",              -0.0312),
+        "wireless":               ("Telecom. (Wireless)",            -0.0412),
+        "media":                  ("Entertainment",                   0.0725),
+        "default":                ("Entertainment",                   0.0725),
+    },
+    "materials": {
+        "chemical":               ("Chemical (Basic)",                0.1856),
+        "mining":                 ("Metals & Mining",                 0.2134),
+        "steel":                  ("Steel",                           0.1923),
+        "default":                ("Chemical (Basic)",                0.1856),
+    },
+    "real estate": {
+        "default":                ("Real Estate (Operations & Svcs)", 0.0234),
+    },
+    "utilities": {
+        "default":                ("Utility (General)",              -0.0234),
+    },
+}
+
+
+def _detect_sector(sector: str, industry: str) -> tuple:
+    """
+    Map yfinance sector/industry to (damodaran_industry_name, nwc_pct).
+    Returns ("Total Market", 0.035) as fallback.
+    """
+    s   = (sector   or "").lower().strip()
+    ind = (industry or "").lower().strip()
+
+    sector_map = None
+    for key in _DAMODARAN_NWC:
+        if key in s:
+            sector_map = _DAMODARAN_NWC[key]
+            break
+
+    if sector_map is None:
+        return ("Total Market", 0.035)
+
+    for keyword, val in sector_map.items():
+        if keyword == "default":
+            continue
+        if keyword in ind:
+            return val
+
+    return sector_map.get("default", ("Total Market", 0.035))
+
+
+def _project_growth_rates(rev_history: list, terminal_g: float = 0.025) -> list | None:
+    """
+    Project 10 annual growth rates from historical revenue list [Y0, Y-1, Y-2, Y-3].
+    Returns None if fewer than 2 valid data points.
+    NOTE: These are model estimates derived from historical trends — not financial advice.
+    """
+    valid = [r for r in rev_history if r and r > 0]
+    if len(valid) < 2:
+        return None
+
+    cagr_1 = cagr_2 = cagr_3 = None
+    if len(valid) >= 2 and valid[1] > 0:
+        cagr_1 = (valid[0] / valid[1]) - 1
+    if len(valid) >= 3 and valid[2] > 0:
+        cagr_2 = (valid[0] / valid[2]) ** (1 / 2) - 1
+    if len(valid) >= 4 and valid[3] > 0:
+        cagr_3 = (valid[0] / valid[3]) ** (1 / 3) - 1
+
+    weights, vals = [], []
+    if cagr_1 is not None: weights.append(0.20); vals.append(cagr_1)
+    if cagr_2 is not None: weights.append(0.40); vals.append(cagr_2)
+    if cagr_3 is not None: weights.append(0.40); vals.append(cagr_3)
+
+    total_w  = sum(weights)
+    base_g   = sum(v * w for v, w in zip(vals, weights)) / total_w
+    y1       = max(terminal_g, min(base_g, 0.60))          # cap at 60%
+
+    # Convex decay: fast early, slow near terminal
+    rates = []
+    for i in range(10):
+        w = ((10 - i) / 10) ** 1.5
+        g = terminal_g + (y1 - terminal_g) * w
+        rates.append(round(max(g, terminal_g), 4))
+    return rates
+
+
 def _get_financials_as_of(
     tk: yf.Ticker, as_of_date: datetime.date, ticker: str = ""
 ) -> dict:
@@ -233,11 +372,17 @@ def _get_financials_as_of(
     EDGAR covers from ~FY2009 for large filers, ~FY2011 for all others.
     Pre-2009 data requires manual entry from 10-K filings.
     """
-    result = dict(revenue_m=0, ebitda_m=0, ni_m=0, debt_m=0, cash_m=0, shares_m=0)
+    result = dict(revenue_m=0, ebitda_m=0, gross_m=0, ni_m=0, debt_m=0, cash_m=0, shares_m=0,
+                  revenue_m_1=0, revenue_m_2=0, revenue_m_3=0,
+                  pretax_m=0, capex_m=0, da_m=0, cur_assets_m=0, cur_liab_m=0)
 
     def nearest_col(df: pd.DataFrame):
         valid = [c for c in df.columns if hasattr(c, "date") and c.date() <= as_of_date]
         return max(valid) if valid else None
+
+    def valid_cols_sorted(df: pd.DataFrame):
+        valid = [c for c in df.columns if hasattr(c, "date") and c.date() <= as_of_date]
+        return sorted(valid, reverse=True)  # most recent first
 
     def safe_row(df, *candidates):
         for name in candidates:
@@ -248,26 +393,59 @@ def _get_financials_as_of(
     # Try yfinance first
     try:
         inc = tk.income_stmt
-        col = nearest_col(inc)
+        cols = valid_cols_sorted(inc)
+        col  = cols[0] if cols else None
         if col is not None:
-            rev  = safe_row(inc, "Total Revenue", "TotalRevenue")
-            ebit = safe_row(inc, "EBITDA", "Ebitda")
-            ni   = safe_row(inc, "Net Income", "NetIncome")
-            result["revenue_m"] = float(rev[col])  / 1e6 if rev  is not None else 0
-            result["ebitda_m"]  = float(ebit[col]) / 1e6 if ebit is not None else 0
-            result["ni_m"]      = float(ni[col])   / 1e6 if ni   is not None else 0
-    except Exception:
-        pass
+            rev    = safe_row(inc, "Total Revenue", "TotalRevenue")
+            ebit   = safe_row(inc, "EBITDA", "Ebitda")
+            ni     = safe_row(inc, "Net Income", "NetIncome")
+            pretax = safe_row(inc, "Pretax Income", "PretaxIncome",
+                              "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest")
+            gross  = safe_row(inc, "Gross Profit", "GrossProfit")
+            result["revenue_m"] = float(rev[col])    / 1e6 if rev    is not None else 0
+            result["ebitda_m"]  = float(ebit[col])   / 1e6 if ebit   is not None else 0
+            result["gross_m"]   = float(gross[col])  / 1e6 if gross  is not None else 0
+            result["ni_m"]      = float(ni[col])     / 1e6 if ni     is not None else 0
+            result["pretax_m"]  = float(pretax[col]) / 1e6 if pretax is not None else 0
+            if rev is not None:
+                if len(cols) >= 2:
+                    result["revenue_m_1"] = float(rev[cols[1]]) / 1e6
+                if len(cols) >= 3:
+                    result["revenue_m_2"] = float(rev[cols[2]]) / 1e6
+                if len(cols) >= 4:
+                    result["revenue_m_3"] = float(rev[cols[3]]) / 1e6
+    except Exception as e:
+        print(f"  Warning: income statement unavailable from yfinance — {e}. Values set to 0.")
 
     try:
         bs  = tk.balance_sheet
         col = nearest_col(bs)
         if col is not None:
-            debt = safe_row(bs, "Total Debt", "TotalDebt", "LongTermDebt")
-            cash = safe_row(bs, "Cash And Cash Equivalents", "CashAndCashEquivalents",
-                            "Cash", "CashEquivalentsAndShortTermInvestments")
-            result["debt_m"] = float(debt[col]) / 1e6 if debt is not None else 0
-            result["cash_m"] = float(cash[col]) / 1e6 if cash is not None else 0
+            debt       = safe_row(bs, "Total Debt", "TotalDebt", "LongTermDebt")
+            cash       = safe_row(bs, "Cash And Cash Equivalents", "CashAndCashEquivalents",
+                                  "Cash", "CashEquivalentsAndShortTermInvestments")
+            cur_assets = safe_row(bs, "Current Assets", "CurrentAssets", "TotalCurrentAssets")
+            cur_liab   = safe_row(bs, "Current Liabilities", "CurrentLiabilities",
+                                  "TotalCurrentLiabilities")
+            result["debt_m"]       = float(debt[col])       / 1e6 if debt       is not None else 0
+            result["cash_m"]       = float(cash[col])       / 1e6 if cash       is not None else 0
+            result["cur_assets_m"] = float(cur_assets[col]) / 1e6 if cur_assets is not None else 0
+            result["cur_liab_m"]   = float(cur_liab[col])   / 1e6 if cur_liab   is not None else 0
+    except Exception as e:
+        print(f"  Warning: balance sheet unavailable from yfinance — {e}. Debt/cash set to 0.")
+
+    try:
+        cf     = tk.cashflow
+        col_cf = nearest_col(cf)
+        if col_cf is not None:
+            capex = safe_row(cf, "Capital Expenditure", "CapitalExpenditure",
+                             "PurchaseOfPPEAndIntangibles", "PurchaseOfPPE")
+            result["capex_m"] = abs(float(capex[col_cf])) / 1e6 if capex is not None else 0
+            da = safe_row(cf, "Depreciation And Amortization", "DepreciationAndAmortization",
+                          "Depreciation Amortization Depletion", "DepreciationAmortizationDepletion",
+                          "Depreciation", "DepreciationDepletionAndAmortization",
+                          "Reconciled Depreciation")
+            result["da_m"] = abs(float(da[col_cf])) / 1e6 if da is not None else 0
     except Exception:
         pass
 
@@ -372,6 +550,8 @@ def fetch_stock_data(ticker: str, as_of_date: datetime.date | None = None) -> di
             "ev_ebitda":    ev_ebitda,
             "ps":           0,
             "revenue_m":    fins["revenue_m"],
+            "revenue_m_1":  fins.get("revenue_m_1", 0),
+            "revenue_m_2":  fins.get("revenue_m_2", 0),
             "ebitda_m":     fins["ebitda_m"],
             "ni_m":         fins["ni_m"],
             "debt_m":       fins["debt_m"],
@@ -381,6 +561,10 @@ def fetch_stock_data(ticker: str, as_of_date: datetime.date | None = None) -> di
             "rev_growth":   0,
             "eps_growth":   0,
             "beta":         beta,
+            "pretax_m":     fins.get("pretax_m", 0),
+            "capex_m":      fins.get("capex_m", 0),
+            "cur_assets_m": fins.get("cur_assets_m", 0),
+            "cur_liab_m":   fins.get("cur_liab_m", 0),
             "rf_rate":      rf_rate,
             "updated":      f"{as_of_date} (historical)",
             "open_price":   open_price,
@@ -399,7 +583,8 @@ def fetch_stock_data(ticker: str, as_of_date: datetime.date | None = None) -> di
     hi52 = float(hist["High"].max()) if not hist.empty else safe("fiftyTwoWeekHigh", 0)
     lo52 = float(hist["Low"].min())  if not hist.empty else safe("fiftyTwoWeekLow",  0)
 
-    shares    = safe("sharesOutstanding", 0)
+    # Prefer diluted (implied) shares; fall back to basic shares outstanding
+    shares    = safe("impliedSharesOutstanding") or safe("sharesOutstanding", 0)
     price     = safe("previousClose") or safe("regularMarketPrice") or safe("currentPrice", 0)
     mktcap    = safe("marketCap", 0)
     ebitda    = safe("ebitda", 0)
@@ -407,14 +592,86 @@ def fetch_stock_data(ticker: str, as_of_date: datetime.date | None = None) -> di
     ni        = safe("netIncomeToCommon", 0)
     debt      = safe("totalDebt", 0)
     cash      = safe("totalCash", 0)
-    beta      = safe("beta", 1.0)
+    _beta_raw = safe("beta", 1.0) or 1.0
+    beta      = max(round((2/3) * _beta_raw + (1/3), 3), 0.40)   # Blume adjustment toward market + floor
     float_pct = safe("floatShares", shares) / shares if shares else 0.99
+
+    # Sector / industry for Damodaran benchmark mapping
+    sector   = safe("sector",   "")
+    industry = safe("industry", "")
+
+    # Prior 3 fiscal years' revenue + pretax income + gross profit for growth rates and margins
+    rev_m_1 = rev_m_2 = rev_m_3 = pretax_m = gross_m = ebit_m = 0.0
+    try:
+        inc_stmt = tk.income_stmt
+        rev_row  = None
+        for name in ("Total Revenue", "TotalRevenue"):
+            if name in inc_stmt.index:
+                rev_row = inc_stmt.loc[name]
+                break
+        for name in ("Pretax Income", "PretaxIncome"):
+            if name in inc_stmt.index:
+                col_i = sorted(inc_stmt.columns, reverse=True)[0]
+                pretax_m = float(inc_stmt.loc[name, col_i]) / 1e6
+                break
+        for name in ("Gross Profit", "GrossProfit"):
+            if name in inc_stmt.index:
+                col_i = sorted(inc_stmt.columns, reverse=True)[0]
+                gross_m = float(inc_stmt.loc[name, col_i]) / 1e6
+                break
+        for name in ("EBIT", "Operating Income", "OperatingIncome", "OperatingIncomeLoss"):
+            if name in inc_stmt.index:
+                col_i = sorted(inc_stmt.columns, reverse=True)[0]
+                ebit_m = float(inc_stmt.loc[name, col_i]) / 1e6
+                break
+        if rev_row is not None:
+            sorted_cols = sorted(inc_stmt.columns, reverse=True)
+            if len(sorted_cols) >= 2:
+                rev_m_1 = float(rev_row[sorted_cols[1]]) / 1e6
+            if len(sorted_cols) >= 3:
+                rev_m_2 = float(rev_row[sorted_cols[2]]) / 1e6
+            if len(sorted_cols) >= 4:
+                rev_m_3 = float(rev_row[sorted_cols[3]]) / 1e6
+    except Exception:
+        pass
 
     # Intraday data for Price Tracker sheet
     open_price    = safe("regularMarketOpen", price)
     session_high  = safe("regularMarketDayHigh", price)
     session_low   = safe("regularMarketDayLow", price)
     market_state  = safe("marketState", "UNKNOWN")
+
+    # CapEx and balance sheet items for derived assumption percentages
+    capex_m = cur_assets_m = cur_liab_m = da_m = 0.0
+    try:
+        cf = tk.cashflow
+        col_cf = sorted(cf.columns, reverse=True)[0]
+        for name in ("Capital Expenditure", "CapitalExpenditure", "PurchaseOfPPEAndIntangibles"):
+            if name in cf.index:
+                capex_m = abs(float(cf.loc[name, col_cf])) / 1e6
+                break
+        for name in ("Depreciation And Amortization", "DepreciationAndAmortization",
+                     "Depreciation Amortization Depletion", "DepreciationAmortizationDepletion",
+                     "Depreciation", "DepreciationDepletionAndAmortization",
+                     "Reconciled Depreciation"):
+            if name in cf.index:
+                da_m = abs(float(cf.loc[name, col_cf])) / 1e6
+                break
+    except Exception:
+        pass
+    try:
+        bs_live = tk.balance_sheet
+        col_b = sorted(bs_live.columns, reverse=True)[0]
+        for name in ("Current Assets", "CurrentAssets", "TotalCurrentAssets"):
+            if name in bs_live.index:
+                cur_assets_m = float(bs_live.loc[name, col_b]) / 1e6
+                break
+        for name in ("Current Liabilities", "CurrentLiabilities", "TotalCurrentLiabilities"):
+            if name in bs_live.index:
+                cur_liab_m = float(bs_live.loc[name, col_b]) / 1e6
+                break
+    except Exception:
+        pass
 
     # S&P 500 today's move
     sp500_move = 0.0
@@ -441,7 +698,14 @@ def fetch_stock_data(ticker: str, as_of_date: datetime.date | None = None) -> di
         "pe":           safe("trailingPE", 0),
         "ev_ebitda":    safe("enterpriseToEbitda", 0),
         "ps":           safe("priceToSalesTrailing12Months", 0),
+        "sector":       sector,
+        "industry":     industry,
+        "gross_m":      gross_m,
+        "ebit_m":       ebit_m,
         "revenue_m":    rev    / 1e6 if rev    else 0,
+        "revenue_m_1":  rev_m_1,
+        "revenue_m_2":  rev_m_2,
+        "revenue_m_3":  rev_m_3,
         "ebitda_m":     ebitda / 1e6 if ebitda else 0,
         "ni_m":         ni     / 1e6 if ni     else 0,
         "debt_m":       debt   / 1e6 if debt   else 0,
@@ -451,6 +715,11 @@ def fetch_stock_data(ticker: str, as_of_date: datetime.date | None = None) -> di
         "rev_growth":   safe("revenueGrowth", 0) or 0,
         "eps_growth":   safe("earningsGrowth", 0) or 0,
         "beta":         beta,
+        "pretax_m":     pretax_m,
+        "capex_m":      capex_m,
+        "da_m":         da_m,
+        "cur_assets_m": cur_assets_m,
+        "cur_liab_m":   cur_liab_m,
         "rf_rate":      None,  # live: leave Assumptions risk-free rate cell untouched
         "updated":      datetime.date.today().strftime("%Y-%m-%d"),
         "open_price":   open_price,
@@ -465,9 +734,29 @@ def fetch_stock_data(ticker: str, as_of_date: datetime.date | None = None) -> di
 # EXCEL WRITER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _read_manifest(xlsx_path: str) -> dict:
+    """Load cell-address manifest written by build_dcf.py alongside the workbook."""
+    manifest_path = xlsx_path.replace(".xlsx", "_manifest.json")
+    try:
+        with open(manifest_path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"  Warning: manifest unreadable — using hardcoded fallback addresses. ({e})")
+        return {}
+
+
+def _cell(manifest: dict, key: str, fallback: str) -> str:
+    """Return just the cell ref (e.g. 'C7') from manifest or hardcoded fallback."""
+    addr = manifest.get(key, fallback)
+    return addr.split("!")[-1] if "!" in addr else addr
+
+
 def update_excel(path: str, data: dict):
     """Write fetched data into DCF_Model.xlsx."""
-    wb = load_workbook(path)
+    wb  = load_workbook(path)
+    mfn = _read_manifest(path)   # cell-address manifest from build_dcf.py
 
     if "Stock Search" not in wb.sheetnames:
         print(f"ERROR: 'Stock Search' sheet not found in {path}")
@@ -481,7 +770,7 @@ def update_excel(path: str, data: dict):
         c.value = value
         c.fill  = gold
 
-    # Stock Search sheet
+    # Stock Search sheet (layout is fixed — no manifest needed here)
     write("B5", data["ticker"])
     write("C5", round(data["price"], 2))
     write("D5", data["name"])
@@ -507,21 +796,156 @@ def update_excel(path: str, data: dict):
     write("D16", round(data["ev_ebitda"], 1) if data["ev_ebitda"] else "N/A")
     write("E16", round(data["beta"],      2) if data["beta"] else 1.0)
 
-    # Assumptions sheet
+    # Assumptions sheet — use manifest for cell addresses; hardcoded strings are fallbacks
     if "Assumptions" in wb.sheetnames:
         wa = wb["Assumptions"]
 
-        def wa_w(ref, val):
+        def wa_w(key_or_ref, val, fallback=None):
+            # If key_or_ref looks like a manifest key (no column letter prefix), resolve it.
+            if fallback is not None:
+                ref = _cell(mfn, key_or_ref, fallback)
+            else:
+                ref = key_or_ref          # raw cell ref passed directly
             write(ref, val, sheet=wa)
 
         wa_w("C5",  data["name"])
         wa_w("E5",  data["ticker"])
-        wa_w("C7",  round(data["price"],    2))
-        wa_w("E7",  round(data["shares_m"], 1))
-        wa_w("C8",  round(data["debt_m"],   0))
-        wa_w("E8",  round(data["cash_m"],   0))
-        wa_w("C22", round(data["beta"],      2) if data["beta"] else 1.0)
-        wa_w("C28", round(data["revenue_m"], 0))
+        wa_w("A_PRICE",  round(data["price"],    2), fallback="C7")
+        wa_w("A_SHARES", round(data["shares_m"], 1), fallback="E7")
+        wa_w("A_DEBT",   round(data["debt_m"],   0), fallback="C8")
+        wa_w("A_CASH",   round(data["cash_m"],   0), fallback="E8")
+        wa_w("A_BETA",   round(data["beta"],      2) if data["beta"] else 1.0, fallback="C22")
+        wa_w("A_REV0",   round(data["revenue_m"],   0), fallback="C28")
+        if data.get("revenue_m_1"):
+            wa_w("A_REV_1", round(data["revenue_m_1"], 0), fallback="E28")
+        if data.get("revenue_m_2"):
+            wa_w("A_REV_2", round(data["revenue_m_2"], 0), fallback="C29")
+
+        # Derived margin / rate assumptions from fetched financials
+        # Source for NWC methodology: Damodaran wcdata.html
+        #   pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/wcdata.html
+        rev_m        = data.get("revenue_m", 0)
+        ebitda_m     = data.get("ebitda_m", 0)
+        ni_m         = data.get("ni_m", 0)
+        pretax_m     = data.get("pretax_m", 0)
+        capex_m      = data.get("capex_m", 0)
+        cash_m       = data.get("cash_m", 0)
+        debt_m       = data.get("debt_m", 0)
+        cur_assets_m = data.get("cur_assets_m", 0)
+        cur_liab_m   = data.get("cur_liab_m", 0)
+
+        da_m         = data.get("da_m", 0)
+        gross_m      = data.get("gross_m", 0)
+        ebit_m       = data.get("ebit_m", 0)
+
+        if rev_m > 0:
+            if gross_m > 0:
+                gm_pct = gross_m / rev_m
+                if 0.01 < gm_pct < 1.0:
+                    wa_w("A_GM", round(gm_pct, 4), fallback="C16")
+                    print(f"  Gross Margin    -> {gm_pct:.2%}")
+
+            # Validate EBITDA: cannot exceed Gross Profit (accounting identity)
+            # If it does, yfinance returned inconsistent data — fall back to EBIT + D&A
+            ebitda_use = ebitda_m
+            if gross_m > 0 and ebitda_m > gross_m:
+                if ebit_m > 0 and da_m > 0:
+                    ebitda_use = ebit_m + da_m
+                    print(f"  Note: EBITDA corrected via EBIT+D&A (yfinance reported EBITDA > Gross Profit)")
+                else:
+                    ebitda_use = 0
+                    print(f"  Warning: EBITDA > Gross Profit and no EBIT fallback -- skipping EBITDA write")
+
+            ebitda_pct = ebitda_use / rev_m if ebitda_use > 0 else 0
+            if 0.01 < ebitda_pct < 0.80:
+                wa_w("A_EBITDA_M", round(ebitda_pct, 4), fallback="E16")
+                print(f"  EBITDA Margin   -> {ebitda_pct:.2%}")
+
+            if da_m > 0:
+                da_pct = da_m / rev_m
+                if 0.005 < da_pct < 0.25:
+                    wa_w("A_DA", round(da_pct, 4), fallback="C17")
+                    print(f"  D&A %           -> {da_pct:.2%}")
+            else:
+                # Sector-based D&A fallback when yfinance returns nothing
+                _DA_SECTOR_DEFAULTS = {
+                    "energy": 0.075,
+                    "utilities": 0.065,
+                    "industrials": 0.040,
+                    "materials": 0.045,
+                    "real estate": 0.040,
+                    "healthcare": 0.035,
+                    "communication services": 0.035,
+                    "consumer cyclical": 0.025,
+                    "consumer defensive": 0.025,
+                    "technology": 0.020,
+                    "financial services": 0.010,
+                }
+                sector_raw = data.get("sector", "").lower()
+                da_default = None
+                for _s, _pct in _DA_SECTOR_DEFAULTS.items():
+                    if _s in sector_raw:
+                        da_default = _pct
+                        break
+                if da_default is None:
+                    da_default = 0.030  # catch-all default
+                if sector_raw:
+                    wa_w("A_DA", round(da_default, 4), fallback="C17")
+                    print(f"  D&A %           -> {da_default:.1%}  (sector default — verify)")
+
+            if pretax_m > 0 and ni_m > 0:
+                tax_rate = 1 - (ni_m / pretax_m)
+                if 0.0 < tax_rate < 0.60:
+                    wa_w("A_TAX", round(tax_rate, 4), fallback="E18")
+                    print(f"  Effective Tax   -> {tax_rate:.2%}")
+
+            if capex_m > 0:
+                capex_pct = capex_m / rev_m
+                if 0 < capex_pct < 0.30:
+                    wa_w("A_CAPEX", round(capex_pct, 4), fallback="E17")
+                    print(f"  CapEx %         -> {capex_pct:.2%}")
+
+            if cur_assets_m > 0 and cur_liab_m > 0:
+                # Non-cash NWC = (CurrentAssets - Cash) - (CurrentLiabilities - ST Debt approx)
+                st_debt_est  = min(debt_m * 0.3, cur_liab_m * 0.15)
+                noncash_wc   = (cur_assets_m - cash_m) - (cur_liab_m - st_debt_est)
+                nwc_pct      = noncash_wc / rev_m
+                if -0.50 < nwc_pct < 0.50:
+                    wa_w("A_NWC", round(nwc_pct, 4), fallback="C18")
+                    print(f"  NWC %           -> {nwc_pct:.2%}  (non-cash NWC / Revenue)")
+
+        # Sector detection — Damodaran benchmark
+        sector_raw   = data.get("sector",   "")
+        industry_raw = data.get("industry", "")
+        dam_industry, dam_nwc = _detect_sector(sector_raw, industry_raw)
+        if sector_raw:
+            print(f"  Sector          -> {sector_raw} / {industry_raw}")
+            print(f"  Damodaran bench -> {dam_industry}  (NWC/Sales = {dam_nwc:.1%})")
+            if cur_assets_m > 0 and cur_liab_m > 0 and rev_m > 0:
+                _st_est   = min(debt_m * 0.3, cur_liab_m * 0.15)
+                _nwc_calc = ((cur_assets_m - cash_m) - (cur_liab_m - _st_est)) / rev_m
+                if -0.50 < _nwc_calc < 0.50:
+                    nwc_delta = abs(_nwc_calc - dam_nwc)
+                    if nwc_delta > 0.10:
+                        print(f"  Note: computed NWC% deviates {nwc_delta:.1%} from Damodaran sector avg — review inputs")
+
+        # Historical growth CAGR -> projected Y1-Y10 revenue growth rates
+        # DISCLAIMER: These are model estimates from historical trends — not financial advice.
+        rev_history = [
+            data.get("revenue_m",   0),
+            data.get("revenue_m_1", 0),
+            data.get("revenue_m_2", 0),
+            data.get("revenue_m_3", 0),
+        ]
+        growth_rates = _project_growth_rates(rev_history)
+        if growth_rates:
+            yr_keys     = ["A_G1","A_G2","A_G3","A_G4","A_G5","A_G6","A_G7","A_G8","A_G9","A_G10"]
+            yr_fallback = ["C10","E10","C11","E11","C12","E12","C13","E13","C14","E14"]
+            for key, fb, g in zip(yr_keys, yr_fallback, growth_rates):
+                wa_w(key, g, fallback=fb)
+            yrs_used = len([r for r in rev_history if r and r > 0]) - 1
+            print(f"  Rev Growth      -> Y1={growth_rates[0]:.1%}  Y5={growth_rates[4]:.1%}  Y10={growth_rates[9]:.1%}"
+                  f"  ({yrs_used}-yr CAGR base -- estimated, not financial advice)")
 
         # Historical-only: also write risk-free rate
         if data.get("rf_rate") is not None:
